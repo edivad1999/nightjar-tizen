@@ -36,6 +36,34 @@ tizen package -t wgt -s <certificate-profile> -- staging
 
 The signed file is what you install. `staging/` is the widget root the command packages.
 
+## Install a release
+
+A push to `main` publishes an unsigned `nightjar.wgt` on [Releases](../../releases/latest). The workflow reads the next version from git tags, the same way [tizentube-alone](https://github.com/edivad1999/tizentube-alone) does, writes it into `tizen/config.xml`, and uploads that package. If that version is newer than the manifest, the workflow commits `tizen/config.xml` back to `main`. A pull request uploads the widget as an artifact and stops there.
+
+1. Download `nightjar.wgt` from Releases.
+2. In Tizen Studio, open Tools, then Certificate Manager. Create a profile. The author certificate is a new Samsung certificate. The distributor certificate is Samsung, Public, on the same account.
+3. Sign the downloaded file. The release package has no signature.
+
+```sh
+tizen package -t wgt -s <certificate-profile> -- nightjar.wgt
+```
+
+4. On the TV, open Settings, Support, About Smart TV and press `1 2 3 4 5`. Turn Developer Mode on. Set Host PC IP to this PC, `192.168.1.168` on the set used here. Restart the TV.
+5. Install it. `sdb` is in `~/tizen-studio/tools/`.
+
+```sh
+sdb connect <tv-ip>
+sdb install nightjar.wgt
+```
+
+Cut a release by pushing `main`:
+
+```sh
+git push origin main
+```
+
+The Release workflow can also be started with `workflow_dispatch`. See [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
 ## Sideload
 
 Target used here: a Samsung S90D on Tizen 9. Developer Mode on the TV must list your PC as `192.168.1.168`.
