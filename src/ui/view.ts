@@ -39,6 +39,7 @@ import {
 } from "./model.ts";
 import { applyStreamView, type OverlayNodes } from "./overlay.ts";
 import { CONTROL_IDS, controlPrefs, controlRows } from "./controls-settings.ts";
+import type { StreamHintPhase } from "./stream-chrome.ts";
 import { text, type Locale, type StringKey } from "./strings.ts";
 
 export const MENU_STATS_ID = "menu-stats";
@@ -47,6 +48,7 @@ export const MENU_LOGS_ID = "menu-logs";
 export function mountLaunchPanel(parent: ParentNode): HTMLElement {
   const node = el("pre", "performance-hud launch-debug");
   node.id = "launch-debug";
+  node.hidden = true;
   parent.append(node);
   return node;
 }
@@ -55,6 +57,20 @@ export function applyLaunchPanel(node: HTMLElement, text: string, shown: boolean
   node.hidden = !shown || text.length === 0;
   node.textContent = text;
   node.scrollTop = node.scrollHeight;
+}
+
+export function mountStreamHint(parent: ParentNode): HTMLElement {
+  const node = el("p", "stream-hint");
+  node.id = "stream-hint";
+  node.hidden = true;
+  parent.append(node);
+  return node;
+}
+
+export function applyStreamHint(node: HTMLElement, label: string, phase: StreamHintPhase): void {
+  node.hidden = phase === "hidden";
+  node.textContent = label;
+  node.classList.toggle("is-fading", phase === "fading");
 }
 
 
@@ -77,6 +93,7 @@ function button(id: string, label: string, className = "button"): HTMLButtonElem
 
 let performanceShown = false;
 let logsOn = false;
+let chromeRoot: HTMLElement | null = null;
 let overlayRoot: HTMLElement | null = null;
 let hudFpsNode: HTMLElement | null = null;
 let hudLatencyNode: HTMLElement | null = null;
@@ -119,6 +136,10 @@ export function setStreamMenuHealth(performance: boolean, logs: boolean): void {
   logsOn = logs;
 }
 
+export function setStreamChromeParked(parked: boolean): void {
+  chromeRoot?.classList.toggle("is-parked", parked);
+}
+
 export function setStreamOverlayVisible(visible: boolean): void {
   if (overlayRoot) {
     overlayRoot.hidden = !visible;
@@ -139,7 +160,14 @@ function fact(label: string): HTMLElement {
   return row;
 }
 
-export function mountStreamOverlay(host: ParentNode): OverlayNodes {
+export function mountStreamOverlay(host: ParentNode): OverlayNodes & {
+  launchParent: HTMLElement;
+  hintParent: HTMLElement;
+} {
+  const chrome = el("div", "stream-chrome");
+  chromeRoot = chrome;
+  const left = el("div", "chrome-left");
+  const right = el("div", "chrome-right");
   const facts = el("aside", "stream-overlay");
   facts.hidden = true;
   overlayRoot = facts;
@@ -174,7 +202,10 @@ export function mountStreamOverlay(host: ParentNode): OverlayNodes {
     }
   }
   hudLatency.append(...cells);
-  host.append(facts, hudFps, hudLatency);
+  left.append(hudFps, facts);
+  right.append(hudLatency);
+  chrome.append(left, right);
+  host.append(chrome);
   const cell = (index: number) => cells[index]?.querySelector("dd") ?? el("dd", "");
   return {
     app: title,
@@ -202,6 +233,8 @@ export function mountStreamOverlay(host: ParentNode): OverlayNodes {
     performanceDropped: cell(7),
     fpsPanel: hudFps,
     latencyPanel: hudLatency,
+    launchParent: right,
+    hintParent: chrome,
   };
 }
 
@@ -1077,11 +1110,8 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   }
 
   if (shell.screen === "stream") {
-    const stream = snapshot?.stream ?? { kind: "none" as const };
     page.className = shell.menuOpen ? "page hide-pointer" : "page stream-clear hide-pointer";
     if (!shell.menuOpen) {
-      const state = stream.kind === "starting" ? stream.state : stream.kind === "live" ? "streaming" : "stream";
-      page.append(el("p", "stream-hint", state === "streaming" ? say(shell, "backOpensMenu") : say(shell, "starting", { state })));
       if (shell.playbackBlocked) {
         page.append(button("play-audio", say(shell, "pressOkForSound"), "button primary playback-prompt"));
       }

@@ -44,13 +44,14 @@ import { openArtworkCache, type CachedApp } from "../storage/artwork-cache.ts";
 import { credentialsForDiscovery, bindStorage, loadPersisted, migrateLibraryKeys, readStored, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, wakesAutomatically, writeHostCredentials, writeStored, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, leavesForTv, type KeySample } from "./keys.ts";
-import { createLaunchTrace } from "./launch-debug.ts";
+import { createLaunchTrace, type LaunchSignal } from "./launch-debug.ts";
+import { streamHintDeadline, streamHintPhase, type StreamHintInput } from "./stream-chrome.ts";
 import { activateFocused, addressDraft, cacheIds, disconnectCommand, initialShell, isLibraryControl, lastAppForHost, preferredCacheId, reduceShell, type LaunchChoice, type LibrarySort, type PairNotice, type SessionCommand, type Shell, type StartFailure, type TextSize } from "./model.ts";
 import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import { text } from "./strings.ts";
 import { CONTROLS_KEY, controlPrefs, installControlPrefs, loadControlPrefs, storedControlPrefs, toggleControl } from "./controls-settings.ts";
-import { applyLaunchPanel, applyStreamView, mountLaunchPanel, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
+import { applyLaunchPanel, applyStreamHint, applyStreamView, mountLaunchPanel, mountStreamHint, mountStreamOverlay, render, setStreamChromeParked, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
 import { openTvStore, type TvFilesystem, type TvPreference } from "../platform/storage.ts";
 import {
   applyHide,
@@ -309,20 +310,71 @@ const overlayNodes = mountStreamOverlay(document.body);
 const artworkCache = openArtworkCache();
 let artworkStamp = "";
 const launchTrace = createLaunchTrace();
-const launchPanel = mountLaunchPanel(document.body);
+const launchPanel = mountLaunchPanel(overlayNodes.launchParent);
+const streamHint = mountStreamHint(overlayNodes.hintParent);
 const pendingLaunchLogs: string[] = [];
+let liveSince: number | null = null;
+let chromeTimer: number | null = null;
 
-function launchPanelShown(): boolean {
-  return shell.launchDebug && shell.screen === "stream";
+function hintInput(now: number): StreamHintInput {
+  const phase = shell.link.phase;
+  const stream = phase.kind === "online" ? phase.snapshot.stream : null;
+  const live = stream?.kind === "live";
+  return {
+    onStream: shell.screen === "stream",
+    menuOpen: shell.menuOpen,
+    live,
+    liveSince,
+    now,
+    reducedMotion: shell.reducedMotion,
+  };
 }
 
-function noteLaunch(step: string, detail = ""): void {
-  launchTrace.note(step, detail);
-  applyLaunchPanel(launchPanel, launchTrace.text().join("\n"), launchPanelShown());
-  const line = launchTrace.text().at(-1);
-  if (line) {
-    pendingLaunchLogs.push(line);
+function syncChrome(now = performance.now()): void {
+  const input = hintInput(now);
+  if (!input.onStream || !input.live) {
+    liveSince = null;
+  } else if (liveSince === null) {
+    liveSince = now;
   }
+  const clock = { ...input, liveSince };
+  const phase = streamHintPhase(clock);
+  const link = shell.link.phase;
+  const stream = link.kind === "online" ? link.snapshot.stream : null;
+  const state = stream?.kind === "starting" ? stream.state : "stream";
+  const label = phase === "starting"
+    ? text(shell.locale, "starting", { state })
+    : text(shell.locale, "backOpensMenu");
+  applyStreamHint(streamHint, label, phase);
+  applyLaunchPanel(launchPanel, launchTrace.text().join("\n"), launchTrace.panelVisible({
+    enabled: shell.launchDebug,
+    onStream: shell.screen === "stream",
+  }));
+  setStreamChromeParked(shell.screen === "stream" && shell.menuOpen);
+  if (chromeTimer !== null) {
+    window.clearTimeout(chromeTimer);
+    chromeTimer = null;
+  }
+  const deadlines = [launchTrace.hideAt(), streamHintDeadline(clock)]
+    .filter((value): value is number => value !== null && value > now);
+  if (deadlines.length === 0) {
+    return;
+  }
+  const wait = Math.min(...deadlines) - now;
+  chromeTimer = window.setTimeout(() => {
+    chromeTimer = null;
+    paint();
+  }, wait);
+}
+
+function noteLaunch(step: string, detail = "", signal?: LaunchSignal): void {
+  if (launchTrace.note(step, detail, signal)) {
+    const line = launchTrace.text().at(-1);
+    if (line) {
+      pendingLaunchLogs.push(line);
+    }
+  }
+  syncChrome();
   flushLaunchLogs();
 }
 
@@ -337,7 +389,7 @@ function flushLaunchLogs(): void {
 }
 
 peer.setPlaybackHandler((state, detail) => {
-  noteLaunch("playback", detail ? `${state} ${detail}` : state);
+  noteLaunch("playback", detail ? `${state} ${detail}` : state, state === "playing" ? "playing" : "not-playing");
   const blocked = state !== "playing";
   if (blocked === shell.playbackBlocked) {
     return;
@@ -409,7 +461,7 @@ function paint(): void {
   capturingInput = capture;
   setStreamMenuHealth(health.performanceShown(), health.logsEnabled());
   focusItems = render(appRoot, shell);
-  applyLaunchPanel(launchPanel, launchTrace.text().join("\n"), launchPanelShown());
+  syncChrome();
   const focus = focusItems.find((item) => item.id === shell.focusId) ?? focusItems[0];
   if (focus && !shell.reducedMotion) {
     document.getElementById(focus.id)?.focus();
@@ -501,16 +553,16 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
       const label = stream.kind === "none" ? "none" : `${stream.kind} ${stream.state}`;
       if (label !== lastStreamLabel) {
         lastStreamLabel = label;
-        noteLaunch("stream", label);
+        noteLaunch("stream", label, stream.kind === "live" ? "live" : "not-live");
       }
       const error = link.phase.snapshot.lastStartError;
       const errorLabel = error ? `${error.code} ${error.message}` : "";
       if (errorLabel && errorLabel !== lastStartErrorLabel) {
         lastStartErrorLabel = errorLabel;
-        noteLaunch("start-error", errorLabel);
+        noteLaunch("start-error", errorLabel, "fault");
       }
     } else if (link.phase.kind !== previous) {
-      noteLaunch("phase", link.phase.kind);
+      noteLaunch("phase", link.phase.kind, "link-down");
     }
     if (shell.playbackBlocked && (link.phase.kind !== "online" || link.phase.snapshot.stream.kind === "none")) {
       shell = { ...shell, playbackBlocked: false };
@@ -821,6 +873,7 @@ function sendCommand(command: SessionCommand): void {
 function commitLibrary(id: string): void {
   const previousLogs = shell.sendLogs;
   const previousOverlay = shell.showOverlay;
+  const previousDebug = shell.launchDebug;
   const next = activateFocused(shell, id);
   const command = next.command;
   shell = command ? { ...next, command: null } : next;
@@ -829,6 +882,9 @@ function commitLibrary(id: string): void {
   }
   if (shell.showOverlay !== previousOverlay && health.performanceShown() !== shell.showOverlay) {
     applyStreamView(overlayNodes, health.togglePerformance());
+  }
+  if (shell.launchDebug && !previousDebug) {
+    launchTrace.reveal(performance.now());
   }
   paint();
   persist();
