@@ -21,10 +21,12 @@ import {
   appIsHidden,
   appsFor,
   artworkFor,
+  canWakeAndPlay,
   continueAppId,
   hostStatus,
-  lastAppForHost,
   lastAppId,
+  orderedHostIndexes,
+  primaryHostAction,
   libraryLists,
   quitOnDisconnectFor,
   resolutionLabel,
@@ -365,28 +367,43 @@ export function focusMap(shell: Shell): FocusItem[] {
         { id: "remove-all-cancel", row: 0, col: 1 },
       ];
     }
-    place(items, "add-host", 0, 0);
-    place(items, "search-hosts", 0, 1);
-    place(items, "help-hosts", 0, 2);
-    shell.hosts.forEach((host, index) => {
+    if (shell.hosts.length === 0) {
+      place(items, "add-host", 0, 0);
+      place(items, "search-hosts", 0, 1);
+      place(items, "help-hosts", 0, 2);
+      return items;
+    }
+    let row = 0;
+    for (const index of orderedHostIndexes(shell)) {
+      const host = shell.hosts[index];
+      if (!host) {
+        continue;
+      }
+      const primary = primaryHostAction(shell, index);
+      place(items, primary, row, 0);
+      row += 1;
       let col = 0;
-      place(items, `host-${index}`, index + 1, col);
-      col += 1;
-      place(items, `wake-${index}`, index + 1, col);
-      col += 1;
-      if (offerWakePlay(shell, host)) {
-        place(items, `wake-play-${index}`, index + 1, col);
+      const secondary = [
+        `host-${index}`,
+        `wake-${index}`,
+        ...(canWakeAndPlay(shell, host) ? [`wake-play-${index}`] : []),
+        `rename-${index}`,
+        `auto-wake-${index}`,
+        `forget-${index}`,
+      ];
+      for (const id of secondary) {
+        if (id === primary) {
+          continue;
+        }
+        place(items, id, row, col);
         col += 1;
       }
-      place(items, `rename-${index}`, index + 1, col);
-      col += 1;
-      place(items, `auto-wake-${index}`, index + 1, col);
-      col += 1;
-      place(items, `forget-${index}`, index + 1, col);
-    });
-    if (shell.hosts.length > 0) {
-      place(items, "remove-all-hosts", shell.hosts.length + 1, 0);
+      row += 1;
     }
+    place(items, "add-host", row, 0);
+    place(items, "search-hosts", row, 1);
+    place(items, "help-hosts", row, 2);
+    place(items, "remove-all-hosts", row + 1, 0);
     return items;
   }
   if (shell.screen === "add" && shell.association.kind === "address") {
@@ -563,11 +580,23 @@ function hostLine(host: SavedHost): string {
   return host.address.includes(":") ? `[${host.address}]:${host.port}` : `${host.address}:${host.port}`;
 }
 
-function offerWakePlay(shell: Shell, host: SavedHost): boolean {
-  if (!wakesAutomatically(host) || !host.macAddress || !lastAppForHost(shell, host)) {
-    return false;
+function hostActionLabel(shell: Shell, host: SavedHost, id: string): string {
+  if (id.startsWith("wake-play-")) {
+    return say(shell, "wakePlay");
   }
-  return !(host.address === shell.activeAddress && shell.link.phase.kind === "online");
+  if (id.startsWith("wake-")) {
+    return say(shell, "wake");
+  }
+  if (id.startsWith("rename-")) {
+    return say(shell, "rename");
+  }
+  if (id.startsWith("auto-wake-")) {
+    return say(shell, wakesAutomatically(host) ? "autoWakeOn" : "autoWakeOff");
+  }
+  if (id.startsWith("forget-")) {
+    return say(shell, "forget");
+  }
+  return host.credentials ? say(shell, "openLibrary") : say(shell, "pair");
 }
 
 function statusName(shell: Shell, host: SavedHost): string {
@@ -688,39 +717,62 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   if (shell.screen === "hosts") {
     const association = shell.association;
     page.append(el("h2", "title", say(shell, "pcs")));
-    const actions = el("div", "action-grid");
-    actions.append(
-      tile(shell, "add-host", "addPc", "addTile", true),
-      tile(shell, "search-hosts", "searchNetwork", "searchTile", false),
-      tile(shell, "help-hosts", "openHelp", "helpTile", false),
-    );
-    page.append(actions);
     if (shell.hosts.length === 0) {
+      const actions = el("div", "action-grid");
+      actions.append(
+        tile(shell, "add-host", "addPc", "addTile", true),
+        tile(shell, "search-hosts", "searchNetwork", "searchTile", false),
+        tile(shell, "help-hosts", "openHelp", "helpTile", false),
+      );
+      page.append(actions);
       page.append(el("p", "empty", say(shell, "noPcs")));
     }
-    shell.hosts.forEach((item, index) => {
-      const card = el("article", "card host-card");
+    const order = orderedHostIndexes(shell);
+    order.forEach((index, position) => {
+      const item = shell.hosts[index];
+      if (!item) {
+        return;
+      }
+      const lead = position === 0;
+      const card = el("article", lead ? "card host-card lead" : "card host-card");
       card.append(el("h3", "card-title", item.name));
       card.append(chip(hostStatus(shell, item), statusName(shell, item)));
       card.append(el("p", "muted", hostLine(item)));
-      const row = el("div", "row");
-      row.append(
-        button(`host-${index}`, item.credentials ? say(shell, "open") : say(shell, "pair"), "button primary"),
-        button(`wake-${index}`, say(shell, "wake")),
-      );
-      if (offerWakePlay(shell, item)) {
-        row.append(button(`wake-play-${index}`, say(shell, "wakePlay"), "button primary"));
+      const primary = primaryHostAction(shell, index);
+      const actions = el("div", "host-actions");
+      const go = el("div", "row");
+      go.append(button(primary, hostActionLabel(shell, item, primary), lead ? "button primary host-go" : "button host-go"));
+      actions.append(go);
+      const quiet = el("div", "row");
+      const secondary = [
+        `host-${index}`,
+        `wake-${index}`,
+        ...(canWakeAndPlay(shell, item) ? [`wake-play-${index}`] : []),
+        `rename-${index}`,
+        `auto-wake-${index}`,
+        `forget-${index}`,
+      ];
+      for (const id of secondary) {
+        if (id === primary) {
+          continue;
+        }
+        quiet.append(button(id, hostActionLabel(shell, item, id), "button host-quiet"));
       }
-      row.append(
-        button(`rename-${index}`, say(shell, "rename")),
-        button(`auto-wake-${index}`, say(shell, wakesAutomatically(item) ? "autoWakeOn" : "autoWakeOff")),
-        button(`forget-${index}`, say(shell, "forget")),
-      );
-      card.append(row);
+      actions.append(quiet);
+      card.append(actions);
       page.append(card);
     });
-    if (shell.hosts.length > 0 && association.kind !== "forget" && association.kind !== "remove-all") {
-      page.append(button("remove-all-hosts", say(shell, "removeAll")));
+    if (shell.hosts.length > 0) {
+      const tools = el("div", "tool-row");
+      tools.append(
+        button("add-host", say(shell, "addPc"), "button tool"),
+        button("search-hosts", say(shell, "searchNetwork"), "button tool"),
+        button("help-hosts", say(shell, "openHelp"), "button tool"),
+      );
+      if (association.kind !== "forget" && association.kind !== "remove-all") {
+        tools.append(button("remove-all-hosts", say(shell, "removeAll"), "button tool"));
+      }
+      page.append(tools);
     }
     if (association.kind === "forget") {
       const saved = shell.hosts.find((item) => item.address === association.address);

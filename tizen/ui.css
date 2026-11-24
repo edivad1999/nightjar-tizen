@@ -179,8 +179,24 @@ button, input { font-family: inherit; }
 
 .host-card .card-title { grid-area: name; margin: 0; }
 .host-card .status { grid-area: status; justify-self: start; }
-.host-card .muted { grid-area: address; margin: 0; }
-.host-card .row { grid-area: actions; }
+.host-card .muted { grid-area: address; margin: 0; font-family: var(--font-mono); }
+.host-card .host-actions {
+  grid-area: actions;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+.host-card.lead {
+  border-left: 6px solid var(--accent);
+  padding: 32px 36px;
+}
+.host-card.lead .card-title { font-size: 48px; }
+.tool-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
 
 .game-card { min-height: 0; }
 
@@ -259,6 +275,36 @@ button, input { font-family: inherit; }
 .key:focus {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: var(--focus-offset);
+}
+
+.host-go {
+  min-height: 96px;
+  min-width: 360px;
+  font-size: 32px;
+}
+
+.host-card:not(.lead) {
+  padding: 20px 24px;
+}
+
+.host-card:not(.lead) .host-actions {
+  gap: var(--space-2);
+}
+
+.host-card:not(.lead) .host-go {
+  min-height: 72px;
+  min-width: 280px;
+  font-size: var(--text-md);
+}
+
+.host-quiet,
+.tool-row .button {
+  min-height: 64px;
+  width: auto;
+  padding: 8px 18px;
+  font-size: var(--text-sm);
+  background: transparent;
+  border-color: var(--line);
 }
 
 .button:disabled,

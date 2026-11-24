@@ -433,6 +433,71 @@ export function lastAppForHost(shell: Shell, host: SavedHost): string | null {
   return shell.lastAppByAddress[hostKey(host)] ?? shell.lastAppByAddress[host.address] ?? null;
 }
 
+export function canWakeAndPlay(shell: Shell, host: SavedHost): boolean {
+  if (!host.credentials || !wakesAutomatically(host) || !host.macAddress || !lastAppForHost(shell, host)) {
+    return false;
+  }
+  return hostStatus(shell, host) === "offline";
+}
+
+export function orderedHostIndexes(shell: Shell): number[] {
+  return shell.hosts.map((_, index) => index).sort((left, right) => {
+    const a = shell.hosts[left];
+    const b = shell.hosts[right];
+    if (!a || !b) {
+      return left - right;
+    }
+    const onlineA = hostStatus(shell, a) === "online" ? 0 : 1;
+    const onlineB = hostStatus(shell, b) === "online" ? 0 : 1;
+    if (onlineA !== onlineB) {
+      return onlineA - onlineB;
+    }
+    const usedA = a.lastUsed ?? 0;
+    const usedB = b.lastUsed ?? 0;
+    if (usedA !== usedB) {
+      return usedB - usedA;
+    }
+    return left - right;
+  });
+}
+
+export function primaryHostAction(shell: Shell, index: number): string {
+  const host = shell.hosts[index];
+  if (!host) {
+    return "add-host";
+  }
+  if (canWakeAndPlay(shell, host)) {
+    return `wake-play-${index}`;
+  }
+  return `host-${index}`;
+}
+
+export function hostsEntryFocus(shell: Shell): string {
+  const top = orderedHostIndexes(shell)[0];
+  if (top === undefined) {
+    return "add-host";
+  }
+  return primaryHostAction(shell, top);
+}
+
+function noteUsed(hosts: SavedHost[], address: string): SavedHost[] {
+  const index = hosts.findIndex((host) => host.address === address);
+  if (index < 0) {
+    return hosts;
+  }
+  const rank = hosts.reduce((max, host) => Math.max(max, host.lastUsed ?? 0), 0) + 1;
+  return hosts.map((host, item) => (item === index ? { ...host, lastUsed: rank } : host));
+}
+
+function focusHost(shell: Shell, hosts: SavedHost[], address: string): string {
+  const next = { ...shell, hosts };
+  const index = hosts.findIndex((host) => host.address === address);
+  if (index < 0) {
+    return hostsEntryFocus(next);
+  }
+  return primaryHostAction(next, index);
+}
+
 export function lastAppId(shell: Shell): string | null {
   const host = shell.hosts.find((item) => item.address === shell.activeAddress);
   if (!host) {
@@ -801,12 +866,14 @@ function saveAddress(shell: Shell): Shell {
     if (!name || !entry.editing) {
       return { ...shell, association: { ...entry, problem: name ? "invalid" : "empty" }, focusId: "save-host" };
     }
+    const hosts = updateHost(shell.hosts, entry.editing, { name, nameLocked: true });
+    const saved = hosts.find((item) => hostKey(item) === entry.editing) ?? null;
     return {
       ...shell,
       screen: "hosts",
-      focusId: "add-host",
+      focusId: saved ? focusHost(shell, hosts, saved.address) : hostsEntryFocus({ ...shell, hosts }),
       association: { kind: "browse" },
-      hosts: updateHost(shell.hosts, entry.editing, { name, nameLocked: true }),
+      hosts,
     };
   }
   const parsed = parseTypedEndpoint(entry.draft.trim());
@@ -833,12 +900,13 @@ function saveAddress(shell: Shell): Shell {
   if (existing?.nameLocked !== undefined) {
     incoming.nameLocked = existing.nameLocked;
   }
+  const hosts = upsertHosts(shell.hosts, [incoming]);
   return {
     ...shell,
     screen: "hosts",
-    focusId: "add-host",
+    focusId: focusHost(shell, hosts, parsed.address),
     association: { kind: "browse" },
-    hosts: upsertHosts(shell.hosts, [incoming]),
+    hosts,
   };
 }
 
@@ -882,8 +950,14 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.screen === "game") {
         return { ...shell, screen: "library", focusId: "continue-last", command: null };
       }
-      if (shell.association.kind === "forget" || shell.association.kind === "remove-all") {
-        return { ...shell, association: { kind: "browse" }, focusId: "add-host" };
+      const association = shell.association;
+      if (association.kind === "forget") {
+        const index = shell.hosts.findIndex((item) => item.address === association.address);
+        const focusId = index >= 0 ? primaryHostAction(shell, index) : hostsEntryFocus(shell);
+        return { ...shell, association: { kind: "browse" }, focusId };
+      }
+      if (association.kind === "remove-all") {
+        return { ...shell, association: { kind: "browse" }, focusId: hostsEntryFocus(shell) };
       }
       if (shell.association.kind === "help") {
         const returnTo = shell.association.returnTo;
@@ -895,16 +969,18 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       }
       if (shell.screen === "settings" || shell.screen === "add" || shell.screen === "pair" || shell.screen === "help") {
         const online = shell.link.phase.kind === "online";
+        const toLibrary = online && shell.screen === "settings";
+        const focusId = toLibrary ? "nav-library" : shell.screen === "add" ? "add-host" : hostsEntryFocus(shell);
         return {
           ...shell,
-          screen: online && shell.screen === "settings" ? "library" : "hosts",
+          screen: toLibrary ? "library" : "hosts",
           association: { kind: "browse" },
           menuOpen: false,
-          focusId: online && shell.screen === "settings" ? "nav-library" : "add-host",
+          focusId,
         };
       }
       if (shell.screen !== "hosts") {
-        return { ...shell, screen: "hosts", menuOpen: false, focusId: "add-host" };
+        return { ...shell, screen: "hosts", menuOpen: false, focusId: hostsEntryFocus(shell) };
       }
       return shell;
     }
@@ -987,14 +1063,14 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       }
       const address = shell.association.address;
       const gone = shell.hosts.find((item) => item.address === address) ?? null;
-      return {
+      const next: Shell = {
         ...shell,
         hosts: shell.hosts.filter((item) => item.address !== address),
         activeAddress: shell.activeAddress === address ? null : shell.activeAddress,
         association: { kind: "browse" },
-        focusId: "add-host",
         ...(gone ? dropHostMemory(shell, gone) : {}),
       };
+      return { ...next, focusId: hostsEntryFocus(next) };
     }
     case "ask-remove-all":
       if (shell.hosts.length === 0) {
@@ -1044,7 +1120,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
     case "open-settings":
       return { ...shell, screen: "settings", menuOpen: false, focusId: "setting-resolution", confirmAppId: null, launchSpent: true };
     case "open-hosts":
-      return { ...shell, screen: "hosts", menuOpen: false, focusId: "add-host", confirmAppId: null, association: { kind: "browse" }, launchSpent: true };
+      return { ...shell, screen: "hosts", menuOpen: false, focusId: hostsEntryFocus(shell), confirmAppId: null, association: { kind: "browse" }, launchSpent: true };
     case "open-library":
       if (shell.link.phase.kind !== "online" && appsFor(shell).length === 0) {
         return shell;
@@ -1077,7 +1153,14 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       const entry = shell.association.kind === "address" || shell.association.kind === "discover"
         ? { kind: "browse" as const }
         : shell.association;
-      const next: Shell = { ...shell, activeAddress: action.address, confirmAppId: null, selectedAppId: null, association: entry };
+      const next: Shell = {
+        ...shell,
+        hosts: noteUsed(shell.hosts, action.address),
+        activeAddress: action.address,
+        confirmAppId: null,
+        selectedAppId: null,
+        association: entry,
+      };
       if (next.link.phase.kind !== "online" && appsFor(next).length > 0) {
         return { ...next, screen: "library", focusId: "continue-last" };
       }

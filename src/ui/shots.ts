@@ -24,13 +24,14 @@ function pin(value: string): Pin {
   return value;
 }
 
-function host(name: string, address: string, paired: boolean, macAddress: string | null = null): SavedHost {
+function host(name: string, address: string, paired: boolean, macAddress: string | null = null, lastUsed = 0): SavedHost {
   return {
     name,
     address,
     port: 8000,
     macAddress,
     credentials: paired ? credentials : null,
+    ...(lastUsed > 0 ? { lastUsed } : {}),
   };
 }
 
@@ -72,15 +73,33 @@ export function shellForShot(name: string): Shell | null {
   if (name === "hosts-empty") {
     return initialShell();
   }
+  if (name === "hosts-one-online") {
+    return reduceShell(online(library), { kind: "open-hosts" });
+  }
+  if (name === "hosts-one-offline") {
+    let shell = reduceShell(initialShell(), {
+      kind: "hosts",
+      hosts: [host("Den", "192.168.1.30", true, "02:00:00:00:00:0B")],
+    });
+    shell = reduceShell(shell, { kind: "select-host", address: "192.168.1.30" });
+    shell = reduceShell(shell, { kind: "remember-last", appId: "hades" });
+    return reduceShell(shell, { kind: "open-hosts" });
+  }
   if (name === "hosts-list" || name === "hosts-it") {
     let shell = online(library);
     shell = reduceShell(shell, {
       kind: "hosts",
       hosts: [
-        host("Living room", "192.168.1.20", true, "02:00:00:00:00:0A"),
-        host("Den", "192.168.1.30", false),
+        host("Den", "192.168.1.30", false, null, 1),
+        host("Office", "192.168.1.40", true, "02:00:00:00:00:0C", 5),
+        host("Living room", "192.168.1.20", true, "02:00:00:00:00:0A", 2),
       ],
     });
+    const office = shell.hosts.find((item) => item.address === "192.168.1.40");
+    if (office) {
+      const key = office.id ?? office.address;
+      shell = { ...shell, lastAppByAddress: { ...shell.lastAppByAddress, [key]: "hades" } };
+    }
     shell = reduceShell(shell, { kind: "open-hosts" });
     if (name === "hosts-it") {
       shell = reduceShell(shell, { kind: "toggle-locale" });
