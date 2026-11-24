@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { localPointer, routeStreamKey } from "../src/input/local-input.ts";
+import { KEYBOARD_LATCH_MS, armKeyboard, keyboardIsActive, localPointer, routeStreamKey } from "../src/input/local-input.ts";
 import { BrowserPeer, openInputChannel } from "../src/net/browser-peer.ts";
 import { InputSession, Wheel, encodeInputMessage, pointerMessages, textMessages } from "../src/protocol/input.ts";
 import { applyStreamKey, keyAction, leavesForTv, streamKeyDecision, type KeySample } from "../src/ui/keys.ts";
@@ -240,84 +240,122 @@ function key(code: string, keyName: string, keyCode: number): KeySample {
   return { type: "keydown", code, key: keyName, keyCode };
 }
 
-test("a hardware keyboard goes to the PC and does not navigate the stream menu", () => {
+test("remote arrows stay on the app path until a keyboard-only key is seen", () => {
   const arrow = key("ArrowLeft", "ArrowLeft", 37);
+  const enter = key("Enter", "Enter", 13);
   assert.equal(keyAction(arrow.code, arrow.keyCode), "left");
+  assert.equal(keyAction(enter.code, enter.keyCode), "activate");
+  for (const event of [arrow, enter]) {
+    assert.equal(routeStreamKey({
+      uiOpen: true,
+      enabled: true,
+      keyboardActive: false,
+      event,
+    }).kind, "ui");
+    assert.equal(routeStreamKey({
+      uiOpen: true,
+      enabled: true,
+      keyboardActive: true,
+      event,
+    }).kind, "ui");
+    assert.equal(routeStreamKey({
+      uiOpen: false,
+      enabled: true,
+      keyboardActive: false,
+      event,
+    }).kind, "ui");
+  }
   assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: false,
+    uiOpen: false,
     enabled: true,
+    keyboardActive: true,
     event: arrow,
-  }), { kind: "ignore" });
+  }), { kind: "host", code: "ArrowLeft", down: true, arm: false });
   assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
+    uiOpen: false,
     enabled: true,
-    event: arrow,
-  }), { kind: "host", code: "ArrowLeft", down: true });
-  assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
-    enabled: true,
-    event: key("KeyA", "a", 65),
-  }), { kind: "host", code: "KeyA", down: true });
-  assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
-    enabled: true,
-    event: { type: "keyup", code: "KeyA", key: "a", keyCode: 65 },
-  }), { kind: "host", code: "KeyA", down: false });
-  assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
-    enabled: true,
-    event: key("ShiftLeft", "Shift", 16),
-  }), { kind: "host", code: "ShiftLeft", down: true });
-  assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
-    enabled: true,
-    event: key("AltLeft", "Alt", 18),
-  }), { kind: "host", code: "AltLeft", down: true });
-  assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
-    enabled: false,
-    event: key("KeyA", "a", 65),
-  }), { kind: "ignore" });
-  assert.deepEqual(routeStreamKey({
-    onStream: false,
-    capturing: false,
-    enabled: true,
-    event: key("KeyA", "a", 65),
-  }), { kind: "ui" });
+    keyboardActive: true,
+    event: enter,
+  }), { kind: "host", code: "Enter", down: true, arm: false });
 });
 
-test("the remote still owns the stream UI", () => {
-  assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
+test("a letter arms the keyboard latch and the latch expires", () => {
+  const letter = routeStreamKey({
+    uiOpen: false,
     enabled: true,
-    event: key("", "ArrowLeft", 37),
-  }), { kind: "ui" });
-  assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: false,
+    keyboardActive: false,
+    event: key("KeyA", "a", 65),
+  });
+  assert.deepEqual(letter, { kind: "host", code: "KeyA", down: true, arm: true });
+  const released = routeStreamKey({
+    uiOpen: false,
     enabled: true,
-    event: key("", "XF86Back", 10009),
-  }), { kind: "ui" });
-  assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
+    keyboardActive: true,
+    event: { type: "keyup", code: "KeyA", key: "a", keyCode: 65 },
+  });
+  assert.deepEqual(released, { kind: "host", code: "KeyA", down: false, arm: true });
+  const armed = armKeyboard(1_000);
+  assert.equal(keyboardIsActive(armed, 1_000 + KEYBOARD_LATCH_MS - 1), true);
+  assert.equal(keyboardIsActive(armed, 1_000 + KEYBOARD_LATCH_MS), false);
+  assert.equal(keyboardIsActive(null, 1_000), false);
+});
+
+test("keys route to the UI while a menu or another screen is open", () => {
+  const letter = routeStreamKey({
+    uiOpen: true,
     enabled: true,
-    event: key("", "Menu", 18),
-  }), { kind: "ui" });
+    keyboardActive: false,
+    event: key("KeyA", "a", 65),
+  });
+  assert.deepEqual(letter, { kind: "ui", arm: true });
   assert.deepEqual(routeStreamKey({
-    onStream: true,
-    capturing: true,
+    uiOpen: false,
     enabled: true,
-    event: key("Exit", "Exit", 10182),
-  }), { kind: "ui" });
+    keyboardActive: false,
+    event: key("ShiftLeft", "Shift", 16),
+  }), { kind: "host", code: "ShiftLeft", down: true, arm: true });
+  assert.deepEqual(routeStreamKey({
+    uiOpen: false,
+    enabled: true,
+    keyboardActive: false,
+    event: key("AltLeft", "Alt", 18),
+  }), { kind: "host", code: "AltLeft", down: true, arm: true });
+  assert.deepEqual(routeStreamKey({
+    uiOpen: false,
+    enabled: false,
+    keyboardActive: false,
+    event: key("KeyA", "a", 65),
+  }), { kind: "ignore", arm: false });
+  assert.equal(routeStreamKey({
+    uiOpen: false,
+    enabled: false,
+    keyboardActive: true,
+    event: key("ArrowLeft", "ArrowLeft", 37),
+  }).kind, "ui");
+});
+
+test("the remote still owns Back, Menu, Exit, and colour keys", () => {
+  const cases = [
+    key("", "ArrowLeft", 37),
+    key("", "XF86Back", 10009),
+    key("", "Menu", 18),
+    key("Exit", "Exit", 10182),
+    key("ColorF0Red", "ColorF0Red", 403),
+  ];
+  for (const event of cases) {
+    assert.equal(routeStreamKey({
+      uiOpen: false,
+      enabled: true,
+      keyboardActive: true,
+      event,
+    }).kind, "ui");
+    assert.equal(routeStreamKey({
+      uiOpen: true,
+      enabled: true,
+      keyboardActive: false,
+      event,
+    }).kind, "ui");
+  }
 });
 
 test("the stream page stylesheet hides the pointer", () => {

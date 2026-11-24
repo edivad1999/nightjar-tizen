@@ -36,7 +36,7 @@ import {
   type PadEffect,
   type PadSnapshot,
 } from "../input/pads.ts";
-import { localPointer, routeStreamKey, type Point } from "../input/local-input.ts";
+import { armKeyboard, keyboardIsActive, localPointer, routeStreamKey, type KeyboardLatch, type Point } from "../input/local-input.ts";
 import { InputSession, Wheel, keyMessage, textMessages } from "../protocol/input.ts";
 import { DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, stepWakePlay, type WakePlay } from "../protocol/wol.ts";
@@ -285,6 +285,7 @@ const streamInput = new InputSession((text) => peer.sendInput(text));
 const wheel = new Wheel();
 let pointerButtons = 0;
 let pointerPoint: Point | null = null;
+let keyboardLatch: KeyboardLatch | null = null;
 let capturingInput = false;
 const pads = createPads();
 let padToken = "";
@@ -392,6 +393,7 @@ function releaseStreamInput(): void {
   streamInput.releaseAll();
   pointerButtons = 0;
   pointerPoint = null;
+  keyboardLatch = null;
   wheel.reset();
   if (document.pointerLockElement) {
     document.exitPointerLock();
@@ -1142,13 +1144,24 @@ function keySample(event: KeyboardEvent, type: "keydown" | "keyup"): KeySample {
   return { type, code: event.code, key: event.key, keyCode: event.keyCode };
 }
 
+function streamUiOpen(): boolean {
+  if (shell.screen !== "stream") {
+    return true;
+  }
+  return shell.menuOpen || shell.playbackBlocked || shell.startError !== null;
+}
+
 function takeStreamKey(event: KeyboardEvent, type: "keydown" | "keyup"): "ui" | "done" {
+  const now = Date.now();
   const route = routeStreamKey({
-    onStream: shell.screen === "stream",
-    capturing: streamCapturing(),
+    uiOpen: streamUiOpen(),
     enabled: controlPrefs().localInput,
+    keyboardActive: keyboardIsActive(keyboardLatch, now),
     event: keySample(event, type),
   });
+  if (route.arm) {
+    keyboardLatch = armKeyboard(now);
+  }
   if (route.kind === "ui") {
     return "ui";
   }
