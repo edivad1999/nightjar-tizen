@@ -352,3 +352,35 @@ export function migrateLibraryKeys(
   }
   return { lastAppByAddress, quitOnDisconnect };
 }
+
+type BoundStore = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+};
+
+let boundStore: BoundStore | null = null;
+
+export function bindStorage(store: BoundStore | null): void {
+  boundStore = store;
+}
+
+function activeStore(): BoundStore {
+  return boundStore ?? globalThis.localStorage;
+}
+
+export function readStored(key: string): string | null {
+  try {
+    return activeStore().getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function writeStored(key: string, value: string): boolean {
+  try {
+    activeStore().setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}

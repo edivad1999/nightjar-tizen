@@ -159,7 +159,16 @@ export function nearestBitrate(value: number): number {
   return best;
 }
 
+let tvHdr: boolean | null = null;
+
+export function setTvHdrSupport(supported: boolean | null): void {
+  tvHdr = supported;
+}
+
 export function hdrAllowed(video: { width: number; height: number; codec: Codec }): boolean {
+  if (tvHdr === false) {
+    return false;
+  }
   if (video.codec === "h264" || video.height <= 720) {
     return false;
   }

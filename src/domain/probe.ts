@@ -160,6 +160,101 @@ export function frameRateMaximum(mode: { width: number; height: number } | null,
   return typeof value === "number" ? value : null;
 }
 
+export type HdrSupport = {
+  panel: boolean | null;
+  decoder: boolean | null;
+};
+
+export type HdrDecodingConfig = {
+  type: "webrtc" | "media-source";
+  video: {
+    contentType: string;
+    width: number;
+    height: number;
+    bitrate: number;
+    framerate: number;
+    hdrMetadataType: "smpteSt2086";
+    colorGamut: "rec2020";
+    transferFunction: "pq";
+  };
+};
+
+export type HdrProbeSource = {
+  isHdrTv?: () => boolean;
+  matchMedia?: (query: string) => { matches: boolean } | null;
+  decodingInfo?: (config: HdrDecodingConfig) => Promise<{ supported?: boolean }>;
+};
+
+export function hdrEnabled(support: HdrSupport): boolean {
+  return support.panel !== false && support.decoder !== false;
+}
+
+function readPanel(source: HdrProbeSource): boolean | null {
+  if (typeof source.isHdrTv === "function") {
+    try {
+      return source.isHdrTv() === true;
+    } catch {
+      return readDynamicRange(source);
+    }
+  }
+  return readDynamicRange(source);
+}
+
+function readDynamicRange(source: HdrProbeSource): boolean | null {
+  if (typeof source.matchMedia !== "function") {
+    return null;
+  }
+  try {
+    const query = source.matchMedia("(dynamic-range: high)");
+    return query ? query.matches === true : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readDecoder(source: HdrProbeSource): Promise<boolean | null> {
+  if (typeof source.decodingInfo !== "function") {
+    return null;
+  }
+  const decodingInfo = source.decodingInfo;
+  const ask = async (type: "webrtc" | "media-source"): Promise<boolean | null> => {
+    const info = await decodingInfo({
+      type,
+      video: {
+        contentType: type === "webrtc" ? "video/H265" : 'video/mp4; codecs="hvc1.2.4.L153.B0"',
+        width: 3840,
+        height: 2160,
+        bitrate: 40_000_000,
+        framerate: 60,
+        hdrMetadataType: "smpteSt2086",
+        colorGamut: "rec2020",
+        transferFunction: "pq",
+      },
+    });
+    if (!info || typeof info.supported !== "boolean") {
+      return null;
+    }
+    return info.supported;
+  };
+  try {
+    return await ask("webrtc");
+  } catch {
+    try {
+      return await ask("media-source");
+    } catch {
+      return null;
+    }
+  }
+}
+
+export async function probeHdr(source: HdrProbeSource): Promise<HdrSupport> {
+  try {
+    return { panel: readPanel(source), decoder: await readDecoder(source) };
+  } catch {
+    return { panel: null, decoder: null };
+  }
+}
+
 export async function probeTv(
   modes: readonly VideoMode[],
   mediaCapabilities: MediaDecodingSource | null | undefined,

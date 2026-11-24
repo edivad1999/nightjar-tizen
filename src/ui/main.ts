@@ -1,6 +1,6 @@
 import { hostKey, parseTypedEndpoint, randomPin, signallingUrl } from "../domain/ids.ts";
 import { shouldAutoPair } from "../domain/pairing.ts";
-import { frameRateMaximum, probeTv, readVideoReceiverCapabilities, tvReceivesAv1 } from "../domain/probe.ts";
+import { frameRateMaximum, hdrEnabled, probeHdr, probeTv, readVideoReceiverCapabilities, tvReceivesAv1 } from "../domain/probe.ts";
 import {
   BITRATES_KBPS,
   CODECS,
@@ -10,6 +10,7 @@ import {
   fitAudio,
   frameRatesFor,
   hdrAllowed,
+  setTvHdrSupport,
   lockFrameRate,
   selectableAudio,
   settingsRejection,
@@ -37,18 +38,32 @@ import {
   type PadSnapshot,
 } from "../input/pads.ts";
 import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
-import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
+import { DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, stepWakePlay, type WakePlay } from "../protocol/wol.ts";
-import { credentialsForDiscovery, loadPersisted, migrateLibraryKeys, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, wakesAutomatically, writeHostCredentials, writeStorageItem, type SavedHost } from "../storage/persist.ts";
+import { credentialsForDiscovery, bindStorage, loadPersisted, migrateLibraryKeys, readStored, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, wakesAutomatically, writeHostCredentials, writeStored, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { createLaunchTrace } from "./launch-debug.ts";
-import { activateFocused, addressDraft, initialShell, isLibraryControl, lastAppForHost, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
+import { activateFocused, addressDraft, disconnectCommand, initialShell, isLibraryControl, lastAppForHost, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
 import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
-import { text, type Locale } from "./strings.ts";
+import { text } from "./strings.ts";
 import { CONTROLS_KEY, controlPrefs, installControlPrefs, loadControlPrefs, storedControlPrefs, toggleControl } from "./controls-settings.ts";
 import { applyLaunchPanel, applyStreamView, mountLaunchPanel, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
+import { openTvStore, type TvFilesystem, type TvPreference } from "../platform/storage.ts";
+import {
+  applyHide,
+  applyShow,
+  clientNameFromModel,
+  exitApp,
+  exitPrompt,
+  exitStep,
+  firstRunLocale,
+  pinBound,
+  readModel,
+  registerTvKeys,
+  type TizenKeys,
+} from "../platform/tizen.ts";
 
 const STORAGE_KEY = "nightjar.tizen.v1";
 const LIBRARY_KEY = "nightjar.tizen.library";
@@ -58,12 +73,28 @@ type UdpBridge = {
   wake: (packet: Uint8Array, address: string) => boolean;
 };
 
-type TizenInput = {
-  tvinputdevice?: { registerKeyBatch?: (keys: string[]) => void };
+type TvHost = {
+  preference?: TvPreference;
+  filesystem?: TvFilesystem;
+  tvinputdevice?: TizenKeys["tvinputdevice"];
+  application?: { getCurrentApplication?: () => { exit?: () => void } };
+};
+
+type WebApis = {
+  productinfo?: { getRealModel?: () => string };
+  avinfo?: { isHdrTvSupport?: () => boolean };
 };
 
 declare global {
   var NightjarUdp: UdpBridge | undefined;
+}
+
+function tvHost(): TvHost | undefined {
+  return (globalThis as { tizen?: TvHost }).tizen;
+}
+
+function webApis(): WebApis | undefined {
+  return (globalThis as { webapis?: WebApis }).webapis;
 }
 
 function stringMap(value: unknown): Record<string, string> | null {
@@ -89,26 +120,27 @@ function booleanMap(value: unknown): Record<string, boolean> | null {
 }
 
 function loadLibrary(shell: Shell): Shell {
+  const system = typeof navigator.language === "string" ? navigator.language : "en";
   try {
-    const raw = localStorage.getItem(LIBRARY_KEY);
+    const raw = readStored(LIBRARY_KEY);
     if (!raw) {
-      return shell;
+      return { ...shell, locale: firstRunLocale(null, system) };
     }
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) {
-      return shell;
+      return { ...shell, locale: firstRunLocale(null, system) };
     }
     const record = parsed as Record<string, unknown>;
-    const locale: Locale = record.locale === "it" ? "it" : "en";
+    const stored = record.locale === "it" || record.locale === "en" ? record.locale : null;
     return {
       ...shell,
-      locale,
+      locale: firstRunLocale(stored, system),
       launchDebug: record.launchDebug === false ? false : true,
       lastAppByAddress: stringMap(record.lastAppByAddress) ?? shell.lastAppByAddress,
       quitOnDisconnect: booleanMap(record.quitOnDisconnect) ?? shell.quitOnDisconnect,
     };
   } catch {
-    return shell;
+    return { ...shell, locale: firstRunLocale(null, system) };
   }
 }
 
@@ -117,7 +149,7 @@ let hostsWritable = true;
 function loadShell(): Shell {
   const shell = loadLibrary(initialShell());
   try {
-    const loaded = loadPersisted(localStorage.getItem(STORAGE_KEY));
+    const loaded = loadPersisted(readStored(STORAGE_KEY));
     hostsWritable = loaded.loadedCleanly;
     return { ...shell, hosts: loaded.persisted.hosts, settings: loaded.persisted.settings };
   } catch {
@@ -176,7 +208,15 @@ if (!(appNode instanceof HTMLElement) || !(videoNode instanceof HTMLVideoElement
 const appRoot = appNode;
 const streamVideo = videoNode;
 
+bindStorage(openTvStore({
+  preference: tvHost()?.preference ?? null,
+  filesystem: tvHost()?.filesystem ?? null,
+  localStorage,
+}));
 let shell = loadShell();
+let platformPaused = false;
+let suspendedStream = false;
+let exitArmed = false;
 let focusItems: FocusItem[] = [];
 const peer = new BrowserPeer(streamVideo);
 const streamInput = new InputSession((text) => peer.sendInput(text));
@@ -186,7 +226,7 @@ let capturingInput = false;
 const pads = createPads();
 let padToken = "";
 let controlWasOpen = false;
-installControlPrefs(loadControlPrefs(localStorage.getItem(CONTROLS_KEY)));
+installControlPrefs(loadControlPrefs(readStored(CONTROLS_KEY)));
 const artRequested = new Set<string>();
 let searchToken = 0;
 let searching = false;
@@ -239,9 +279,9 @@ peer.setPlaybackHandler((state, detail) => {
 
 function persist(): void {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readStored(STORAGE_KEY);
     if (shouldWriteHosts(raw, shell.hosts, hostsWritable)) {
-      const wrote = writeStorageItem(localStorage, STORAGE_KEY, serializePersisted({
+      const wrote = writeStored(STORAGE_KEY, serializePersisted({
         hosts: shell.hosts,
         settings: shell.settings,
       }));
@@ -249,7 +289,7 @@ function persist(): void {
         hostsWritable = true;
       }
     }
-    writeStorageItem(localStorage, LIBRARY_KEY, JSON.stringify({
+    writeStored(LIBRARY_KEY, JSON.stringify({
       locale: shell.locale,
       launchDebug: shell.launchDebug,
       lastAppByAddress: shell.lastAppByAddress,
@@ -324,8 +364,8 @@ function noticeFor(code: string, message: string): PairNotice | null {
 }
 
 const client = new SignallingClient(peer satisfies MediaPeer, {
-  clientName: CLIENT_NAME,
-  nextPin: () => randomPin((bound) => Math.floor(Math.random() * bound)),
+  clientName: clientNameFromModel(readModel(webApis()?.productinfo)),
+  nextPin: () => randomPin(pinBound),
 }, {
   onState: (link) => {
     const previous = shell.link.phase.kind;
@@ -359,7 +399,7 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
       pairing: link.pairing,
     })) {
       queueMicrotask(() => {
-        client.intent({ kind: "pair", pin: randomPin((bound) => Math.floor(Math.random() * bound)) });
+        client.intent({ kind: "pair", pin: randomPin(pinBound) });
       });
     }
     if (link.phase.kind === "online") {
@@ -670,7 +710,7 @@ function activate(id: string): void {
   const controls = toggleControl(controlPrefs(), id);
   if (controls) {
     installControlPrefs(controls);
-    localStorage.setItem(CONTROLS_KEY, storedControlPrefs(controls));
+    writeStored(CONTROLS_KEY, storedControlPrefs(controls));
     paint();
     return;
   }
@@ -724,7 +764,7 @@ function activate(id: string): void {
     return;
   }
   if (id === "new-pin") {
-    client.intent({ kind: "pair", pin: randomPin((bound) => Math.floor(Math.random() * bound)) });
+    client.intent({ kind: "pair", pin: randomPin(pinBound) });
     return;
   }
   if (id === "nav-pcs") {
@@ -1272,6 +1312,9 @@ function applyPadEffect(effect: PadEffect): void {
 }
 
 window.setInterval(() => {
+  if (platformPaused) {
+    return;
+  }
   syncPadSession();
   const phase = shell.link.phase;
   const stream = phase.kind === "online" ? phase.snapshot.stream : null;
@@ -1380,22 +1423,114 @@ async function readStream(): Promise<void> {
 }
 
 window.setInterval(() => {
+  if (platformPaused) {
+    return;
+  }
   void readStream();
 }, STALL_SAMPLE_INTERVAL_MS);
 
 window.setInterval(() => {
+  if (platformPaused) {
+    return;
+  }
   health.flushLogs((message) => client.sendAuthenticated(JSON.stringify(message)));
 }, CLIENT_LOG_FLUSH_MS);
+
+function sessionLive(): boolean {
+  const phase = shell.link.phase;
+  return phase.kind === "online" && phase.snapshot.stream.kind !== "none";
+}
 
 const migrated = migrateLibraryKeys(shell.hosts, shell.lastAppByAddress, shell.quitOnDisconnect);
 shell = { ...shell, lastAppByAddress: migrated.lastAppByAddress, quitOnDisconnect: migrated.quitOnDisconnect };
 syncWatches();
 maybeDiscover();
-paint();
 
-try {
-  const tizen = (globalThis as { tizen?: TizenInput }).tizen;
-  tizen?.tvinputdevice?.registerKeyBatch?.(["Exit", "Menu", "Info", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue"]);
-} catch {
-  // A TV without the tv.inputdevice privilege throws here. The PC list is already painted.
+function onTvHidden(): void {
+  platformPaused = true;
+  releaseStreamInput();
+  const command = applyHide({
+    streaming: sessionLive(),
+    quitOnDisconnect: disconnectCommand(shell) === "stop-host-session",
+  }, tvHost());
+  suspendedStream = command !== null;
+  if (command === "stop-host-session") {
+    client.intent({ kind: "quit-game" });
+  } else if (command === "stop-session") {
+    client.intent({ kind: "disconnect-stream" });
+  }
 }
+
+function onTvVisible(): void {
+  platformPaused = false;
+  const resume = applyShow(shell.link.phase.kind === "online", tvHost());
+  if (!suspendedStream) {
+    return;
+  }
+  suspendedStream = false;
+  if (resume === "reconnect") {
+    const host = shell.hosts.find((item) => item.address === shell.activeAddress);
+    if (host) {
+      connectHost(host);
+    }
+    return;
+  }
+  if (shell.screen === "stream") {
+    apply({ kind: "open-library" });
+  }
+}
+
+function onExitKey(event: KeyboardEvent): void {
+  const prompt = exitPrompt(shell.locale);
+  const step = exitStep(shell.screen, exitArmed, keyAction(event.code, event.keyCode) === "back");
+  exitArmed = step.armed;
+  if (step.action === "ask") {
+    apply({ kind: "toast", toast: { kind: "info", text: prompt } });
+    return;
+  }
+  if (step.action === "exit") {
+    exitApp(tvHost()?.application);
+    return;
+  }
+  if (shell.toast.kind === "info" && shell.toast.text === prompt) {
+    apply({ kind: "toast", toast: { kind: "hidden" } });
+  }
+}
+
+paint();
+registerTvKeys(tvHost());
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    onTvHidden();
+    return;
+  }
+  onTvVisible();
+});
+document.addEventListener("keydown", onExitKey, true);
+void probeHdr({
+  isHdrTv: () => {
+    const avinfo = webApis()?.avinfo;
+    if (!avinfo || typeof avinfo.isHdrTvSupport !== "function") {
+      throw new Error("no avinfo");
+    }
+    return avinfo.isHdrTvSupport();
+  },
+  matchMedia: (query) => (typeof window.matchMedia === "function" ? window.matchMedia(query) : null),
+  decodingInfo: (config) => {
+    const media = navigator.mediaCapabilities;
+    if (!media || typeof media.decodingInfo !== "function") {
+      return Promise.reject(new Error("no decoder"));
+    }
+    return media.decodingInfo(config);
+  },
+}).then((support) => {
+  if (hdrEnabled(support)) {
+    return;
+  }
+  setTvHdrSupport(false);
+  if (shell.settings.hdr) {
+    apply({ kind: "settings", patch: { hdr: false } });
+    return;
+  }
+  paint();
+});
