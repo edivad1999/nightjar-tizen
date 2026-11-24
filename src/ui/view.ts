@@ -23,6 +23,7 @@ import {
   runningAppId,
   snapshotOf,
   streamingAppId,
+  type PairView,
   type Shell,
 } from "./model.ts";
 import { applyStreamView, type OverlayNodes } from "./overlay.ts";
@@ -148,6 +149,81 @@ function say(shell: Shell, key: StringKey, vars?: Record<string, string>): strin
   return text(shell.locale, key, vars);
 }
 
+function tile(shell: Shell, id: string, title: StringKey, detail: StringKey, primary: boolean): HTMLButtonElement {
+  const node = button(id, "", primary ? "button action-tile primary" : "button action-tile");
+  node.replaceChildren(el("span", "", say(shell, title)), el("small", "", say(shell, detail)));
+  return node;
+}
+
+function keyButton(id: string, label: string, className = "key"): HTMLButtonElement {
+  return button(id, label, className);
+}
+
+function digitKeys(shell: Shell): HTMLElement {
+  const pad = el("div", "keypad digits");
+  for (const key of ["1", "2", "3", "4", "5", "6", "7", "8", "9"]) {
+    pad.append(keyButton(`key-${key}`, key));
+  }
+  pad.append(
+    keyButton("key-dot", "."),
+    keyButton("key-0", "0"),
+    keyButton("key-colon", ":"),
+    keyButton("key-letters", say(shell, "keypadLetters"), "key half"),
+    keyButton("key-delete", say(shell, "keypadDelete"), "key half"),
+  );
+  return pad;
+}
+
+function letterKeys(shell: Shell): HTMLElement {
+  const pad = el("div", "keypad");
+  for (const key of "abcdefghijklmnopqrstuvwxyz") {
+    pad.append(keyButton(`key-${key}`, key));
+  }
+  pad.append(
+    keyButton("key-hyphen", "-"),
+    keyButton("key-dot", "."),
+    keyButton("key-colon", ":"),
+    keyButton("key-digits", say(shell, "keypadDigits"), "key wide"),
+    keyButton("key-delete", say(shell, "keypadDelete"), "key wide"),
+  );
+  return pad;
+}
+
+function pairHeading(shell: Shell, kind: PairView["kind"]): string {
+  if (kind === "failed") {
+    return say(shell, "pairFailedTitle");
+  }
+  if (kind === "rejected") {
+    return say(shell, "pairRejectedTitle");
+  }
+  return say(shell, "pairTitle");
+}
+
+function pairBody(shell: Shell, view: PairView): string {
+  if (view.kind === "waiting") {
+    return say(shell, "pairWaiting");
+  }
+  if (view.kind === "checking") {
+    return say(shell, "pairChecking");
+  }
+  if (view.kind === "paired") {
+    return say(shell, "pairPaired", { name: view.hostName });
+  }
+  if (view.kind === "failed") {
+    return view.message;
+  }
+  if (view.kind === "timed-out") {
+    return say(shell, "pairTimedOut");
+  }
+  if (view.kind === "retry") {
+    return say(shell, "pairRetry");
+  }
+  if (view.kind === "rejected") {
+    return view.message;
+  }
+  return say(shell, "pairHelp");
+}
+
 function extensionsOf(shell: Shell): HostExtensions | null {
   return shell.link.phase.kind === "online" ? shell.link.phase.snapshot.extensions : null;
 }
@@ -182,8 +258,15 @@ export function focusMap(shell: Shell): FocusItem[] {
   }
   const items: FocusItem[] = [];
   if (shell.screen === "hosts") {
+    if (shell.association.kind === "forget") {
+      return [
+        { id: "forget-confirm", row: 0, col: 0 },
+        { id: "forget-cancel", row: 0, col: 1 },
+      ];
+    }
     place(items, "add-host", 0, 0);
     place(items, "search-hosts", 0, 1);
+    place(items, "help-hosts", 0, 2);
     shell.hosts.forEach((_, index) => {
       place(items, `host-${index}`, index + 1, 0);
       place(items, `wake-${index}`, index + 1, 1);
@@ -191,18 +274,68 @@ export function focusMap(shell: Shell): FocusItem[] {
     });
     return items;
   }
-  if (shell.screen === "add") {
+  if (shell.screen === "add" && shell.association.kind === "address") {
+    if (shell.association.board === "letters") {
+      const letters = "abcdefghijklmnopqrstuvwxyz";
+      for (let index = 0; index < letters.length; index += 1) {
+        place(items, `key-${letters[index]}`, Math.floor(index / 6), index % 6);
+      }
+      place(items, "key-hyphen", 4, 2);
+      place(items, "key-dot", 4, 3);
+      place(items, "key-colon", 4, 4);
+      place(items, "key-digits", 5, 0);
+      place(items, "key-delete", 5, 1);
+      place(items, "save-host", 5, 2);
+      return items;
+    }
+    const digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "dot", "0", "colon"];
+    digits.forEach((key, index) => {
+      place(items, key === "dot" || key === "colon" ? `key-${key}` : `key-${key}`, Math.floor(index / 3), index % 3);
+    });
+    place(items, "key-letters", 4, 0);
+    place(items, "key-delete", 4, 1);
+    place(items, "save-host", 5, 0);
+    return items;
+  }
+  if (shell.screen === "discover" && shell.association.kind === "discover") {
+    const phase = shell.association.phase;
+    if (phase === "results") {
+      shell.association.addresses.forEach((_, index) => {
+        place(items, `found-${index}`, index, 0);
+      });
+      place(items, "discover-manual", shell.association.addresses.length, 0);
+      place(items, "discover-cancel", shell.association.addresses.length + 1, 0);
+      return items;
+    }
+    if (phase === "searching") {
+      return [{ id: "discover-cancel", row: 0, col: 0 }];
+    }
     return [
-      { id: "address-input", row: 0, col: 0 },
-      { id: "save-host", row: 1, col: 0 },
+      { id: "discover-manual", row: 0, col: 0 },
+      { id: "discover-cancel", row: 1, col: 0 },
     ];
   }
-  if (shell.screen === "pair") {
-    const phase = shell.link.phase.kind;
-    if (phase === "need-pair" || phase === "fault" || phase === "disabled") {
+  if (shell.screen === "help") {
+    return [{ id: "help-done", row: 0, col: 0 }];
+  }
+  if (shell.screen === "pair" && shell.association.kind === "pair") {
+    const view = shell.association.view.kind;
+    if (view === "issue") {
       return [{ id: "new-pin", row: 0, col: 0 }];
     }
-    return [];
+    if (view === "failed") {
+      return [
+        { id: "new-pin", row: 0, col: 0 },
+        { id: "pair-cancel", row: 1, col: 0 },
+      ];
+    }
+    if (view === "rejected") {
+      return [{ id: "pair-back", row: 0, col: 0 }];
+    }
+    if (view === "paired") {
+      return [{ id: "pair-done", row: 0, col: 0 }];
+    }
+    return [{ id: "pair-cancel", row: 0, col: 0 }];
   }
   if (shell.screen === "stream") {
     if (!shell.menuOpen) {
@@ -255,7 +388,10 @@ export function focusMap(shell: Shell): FocusItem[] {
     }
     place(items, "setting-quit-on-disconnect", row, 0);
     place(items, "setting-language", row + 1, 0);
+    place(items, "setting-help", row + 2, 0);
+    return items;
   }
+  place(items, "setting-help", 5, 0);
   return items;
 }
 
@@ -327,17 +463,29 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   }
   bar.append(status);
   page.append(bar);
-  if (shell.banner) {
-    page.append(el("p", "banner", shell.banner));
+  if (shell.toast.kind === "info") {
+    page.append(el("p", "toast toast-info", shell.toast.text));
+  } else if (shell.toast.kind === "error") {
+    page.append(el("p", "toast", shell.toast.text));
+  } else if (shell.toast.kind === "waking") {
+    page.append(el("p", "toast toast-waking", say(shell, "waking", { name: shell.toast.name })));
+  } else if (shell.toast.kind === "wake-missing") {
+    page.append(el("p", "toast", say(shell, "wakeMissing")));
+  } else if (shell.toast.kind === "wake-unavailable") {
+    page.append(el("p", "toast", say(shell, "wakeUnavailable")));
   }
+  page.dataset.association = shell.association.kind;
 
   if (shell.screen === "hosts") {
+    const association = shell.association;
     page.append(el("h2", "title", say(shell, "pcs")));
-    const add = button("add-host", say(shell, "addPc"));
-    const search = button("search-hosts", say(shell, "searchNetwork"));
-    const row = el("div", "row");
-    row.append(add, search);
-    page.append(row);
+    const actions = el("div", "action-grid");
+    actions.append(
+      tile(shell, "add-host", "addPc", "addTile", true),
+      tile(shell, "search-hosts", "searchNetwork", "searchTile", false),
+      tile(shell, "help-hosts", "openHelp", "helpTile", false),
+    );
+    page.append(actions);
     if (shell.hosts.length === 0) {
       page.append(el("p", "empty", say(shell, "noPcs")));
     }
@@ -345,39 +493,131 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       const card = el("article", "card host-card");
       card.append(el("h3", "card-title", item.name));
       card.append(chip(hostStatus(shell, item), statusName(shell, item)));
-      const detail = item.credentials ? item.address : say(shell, "notPairedAddress", { address: item.address });
-      card.append(el("p", "muted", detail));
-      const open = button(`host-${index}`, item.credentials ? say(shell, "open") : say(shell, "pair"), "button primary");
-      const wake = button(`wake-${index}`, say(shell, "wake"));
-      const forget = button(`forget-${index}`, say(shell, "forget"));
-      const actions = el("div", "row");
-      actions.append(open, wake, forget);
-      card.append(actions);
+      card.append(el("p", "muted", item.address));
+      const row = el("div", "row");
+      row.append(
+        button(`host-${index}`, item.credentials ? say(shell, "open") : say(shell, "pair"), "button primary"),
+        button(`wake-${index}`, say(shell, "wake")),
+        button(`forget-${index}`, say(shell, "forget")),
+      );
+      card.append(row);
       page.append(card);
     });
-  }
-
-  if (shell.screen === "add") {
-    page.append(el("h2", "title", say(shell, "addTitle")));
-    page.append(el("p", "muted", say(shell, "addHelp")));
-    const input = el("input", "text-input");
-    input.id = "address-input";
-    input.dataset.nav = input.id;
-    input.placeholder = "192.168.1.10";
-    input.autocomplete = "off";
-    page.append(input, button("save-host", say(shell, "connect"), "button primary"));
-  }
-
-  if (shell.screen === "pair") {
-    const phase = shell.link.phase;
-    page.append(el("h2", "title", say(shell, "pairTitle")));
-    page.append(el("p", "muted", say(shell, "pairHelp")));
-    page.append(el("p", "pin", phase.kind === "pairing" ? phase.pin : "····"));
-    if (phase.kind === "need-pair" || phase.kind === "fault" || phase.kind === "disabled") {
-      page.append(button("new-pin", say(shell, "newPin"), "button primary"));
-    } else {
-      page.append(el("p", "muted", say(shell, "waiting")));
+    if (association.kind === "forget") {
+      const saved = shell.hosts.find((item) => item.address === association.address);
+      const name = saved?.name ?? association.address;
+      const scrim = el("div", "scrim");
+      const dialog = el("div", "dialog");
+      dialog.role = "dialog";
+      dialog.setAttribute("aria-modal", "true");
+      dialog.append(el("h2", "title", say(shell, "forgetTitle", { name })));
+      dialog.append(el("p", "lede", say(shell, "forgetBody", { name })));
+      const row = el("div", "row");
+      row.append(
+        button("forget-confirm", say(shell, "forgetConfirm"), "button primary"),
+        button("forget-cancel", say(shell, "cancel")),
+      );
+      dialog.append(row);
+      scrim.append(dialog);
+      page.append(scrim);
     }
+    page.append(el("p", "hint-bar", say(shell, "hintRemote")));
+  }
+
+  if (shell.screen === "add" && shell.association.kind === "address") {
+    const entry = shell.association;
+    page.dataset.board = entry.board;
+    const layout = el("div", "address-layout");
+    const copy = el("div", "stack");
+    copy.append(el("h2", "title", say(shell, "addTitle")));
+    copy.append(el("p", "lede", say(shell, "addHelp")));
+    const readout = el("p", entry.draft.length === 0 ? "readout is-empty" : "readout", entry.draft.length === 0 ? say(shell, "addressPlaceholder") : entry.draft);
+    readout.id = "address-readout";
+    copy.append(readout);
+    const problem = entry.problem === "empty" ? say(shell, "addressEmpty") : entry.problem === "invalid" ? say(shell, "addressInvalid") : "";
+    copy.append(el("p", "problem", problem));
+    const keys = el("div", "stack");
+    keys.append(entry.board === "letters" ? letterKeys(shell) : digitKeys(shell));
+    keys.append(button("save-host", say(shell, "connect"), "button primary"));
+    layout.append(copy, keys);
+    page.append(layout);
+  }
+
+  if (shell.screen === "discover" && shell.association.kind === "discover") {
+    const phase = shell.association.phase;
+    page.dataset.discover = phase;
+    const layout = el("div", "stack");
+    layout.append(el("h2", "title", say(shell, "discoverTitle")));
+    if (phase === "searching") {
+      layout.append(el("p", "lede", say(shell, "discoverSearching")));
+    } else if (phase === "none") {
+      layout.append(el("p", "lede", say(shell, "discoverNone")));
+    } else if (phase === "blocked") {
+      layout.append(el("p", "lede", say(shell, "discoverBlocked")));
+    }
+    if (phase === "results") {
+      const list = el("div", "discover-list");
+      shell.association.addresses.forEach((address, index) => {
+        const saved = shell.hosts.find((item) => item.address === address);
+        const label = saved ? `${saved.name} · ${address}` : address;
+        list.append(button(`found-${index}`, label, index === 0 ? "button primary" : "button"));
+      });
+      layout.append(list);
+    }
+    if (phase !== "searching") {
+      layout.append(button("discover-manual", say(shell, "discoverManual"), phase === "results" ? "button" : "button primary"));
+    }
+    layout.append(button("discover-cancel", say(shell, "discoverCancel")));
+    page.append(layout);
+  }
+
+  if (shell.screen === "help") {
+    page.append(el("h2", "title", say(shell, "helpTitle")));
+    page.append(el("p", "lede", say(shell, "helpLead")));
+    const list = el("dl", "help-list");
+    for (const row of [
+      ["helpArrows", "helpArrowsBody"],
+      ["helpEnter", "helpEnterBody"],
+      ["helpBack", "helpBackBody"],
+    ] as const) {
+      const item = el("div", "");
+      item.append(el("dt", "", say(shell, row[0])), el("dd", "", say(shell, row[1])));
+      list.append(item);
+    }
+    page.append(list, button("help-done", say(shell, "helpDone"), "button primary"));
+  }
+
+  if (shell.screen === "pair" && shell.association.kind === "pair") {
+    const view = shell.association.view;
+    page.dataset.pair = view.kind;
+    const layout = el("div", "pair-layout");
+    const copy = el("div", "stack");
+    const pin = view.kind === "waiting" || view.kind === "timed-out" || view.kind === "retry" ? view.pin : "";
+    copy.append(el("h2", "title", pairHeading(shell, view.kind)));
+    copy.append(el("p", "lede", pairBody(shell, view)));
+    if (pin) {
+      copy.append(el("p", "pin", pin));
+    }
+    if (view.kind === "issue" || view.kind === "failed") {
+      copy.append(button("new-pin", say(shell, view.kind === "issue" ? "newPin" : "pairNew"), "button primary"));
+    }
+    if (view.kind === "failed" || view.kind === "waiting" || view.kind === "timed-out" || view.kind === "retry" || view.kind === "checking") {
+      copy.append(button("pair-cancel", say(shell, "pairCancel"), view.kind === "failed" ? "button" : "button primary"));
+    }
+    if (view.kind === "rejected") {
+      copy.append(button("pair-back", say(shell, "pairCancel"), "button primary"));
+    }
+    if (view.kind === "paired") {
+      copy.append(button("pair-done", say(shell, "pairDone"), "button primary"));
+    }
+    layout.append(copy);
+    if (pin) {
+      const aside = el("aside", "pair-copy");
+      aside.append(el("h2", "title", say(shell, "pairOnPc")));
+      aside.append(el("p", "lede", say(shell, "pairOnPcBody")));
+      layout.append(aside);
+    }
+    page.append(layout);
   }
 
   if (shell.screen === "library" || shell.screen === "game" || shell.screen === "settings") {
@@ -421,6 +661,7 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       grid.append(card);
     }
     page.append(grid);
+    page.append(el("p", "hint-bar", say(shell, "hintRemote")));
   }
 
   if (shell.screen === "game") {
@@ -484,7 +725,9 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     const more = button("setting-more", say(shell, "moreSettings"));
     more.setAttribute("aria-expanded", shell.moreOpen ? "true" : "false");
     recommended.append(more);
+    recommended.append(button("setting-help", say(shell, "openHelp")));
     page.append(recommended);
+    page.append(el("p", "hint-bar", say(shell, "hintRemote")));
     if (shell.moreOpen) {
       const extra = el("section", "settings-group");
       extra.dataset.group = "more";

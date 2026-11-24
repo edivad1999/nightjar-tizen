@@ -180,11 +180,15 @@ button, input { font-family: inherit; }
 .host-card .muted { grid-area: address; margin: 0; }
 .host-card .row { grid-area: actions; }
 
-.game-card { min-height: 340px; }
+.game-card { min-height: 0; }
+
+.stream-clear .topbar,
+.stream-clear .toast,
+.stream-clear .hint-bar { display: none; }
 
 .cover {
   width: 100%;
-  height: 220px;
+  height: 168px;
   object-fit: cover;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
@@ -277,7 +281,9 @@ button, input { font-family: inherit; }
   color: var(--ink);
 }
 
-.readout.is-empty { color: var(--muted); }
+.readout.is-empty { color: #8e948d; }
+
+.stack > .button { display: block; width: 100%; }
 
 .problem { min-height: 1.35em; color: var(--danger); }
 
@@ -425,7 +431,7 @@ button, input { font-family: inherit; }
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  width: min(960px, 100%);
+  width: 100%;
 }
 
 .settings-group .title { margin: 0; }
@@ -469,7 +475,8 @@ button, input { font-family: inherit; }
   gap: 12px;
 }
 
-.keypad.digits { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.keypad.digits .key { grid-column: span 2; }
+.keypad.digits .key.half { grid-column: span 3; }
 
 .key {
   min-height: 84px;
@@ -479,7 +486,7 @@ button, input { font-family: inherit; }
   padding: 12px;
 }
 
-.key.wide { grid-column: span 2; font-family: var(--font-text); font-size: var(--text-md); }
+.key.wide { grid-column: span 3; font-family: var(--font-text); font-size: var(--text-md); }
 
 .address-layout, .discover-layout, .help-layout {
   display: grid;
