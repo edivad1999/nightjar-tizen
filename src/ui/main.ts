@@ -29,11 +29,13 @@ import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.
 import { parsePersisted, serializePersisted, updateHost, upsertHosts, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
-import { initialShell, reduceShell, type Shell } from "./model.ts";
+import { activateFocused, initialShell, isLibraryControl, reduceShell, type SessionCommand, type Shell } from "./model.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
+import type { Locale } from "./strings.ts";
 import { applyStreamView, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
 
 const STORAGE_KEY = "nightjar.tizen.v1";
+const LIBRARY_KEY = "nightjar.tizen.library";
 
 type UdpBridge = {
   broadcast: (payload: Uint8Array, port: number, timeoutMs: number) => Promise<BroadcastReply[]>;
@@ -48,8 +50,53 @@ declare global {
   var NightjarUdp: UdpBridge | undefined;
 }
 
+function stringMap(value: unknown): Record<string, string> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const entries = Object.entries(value);
+  if (entries.some(([, item]) => typeof item !== "string")) {
+    return null;
+  }
+  return Object.fromEntries(entries);
+}
+
+function booleanMap(value: unknown): Record<string, boolean> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const entries = Object.entries(value);
+  if (entries.some(([, item]) => typeof item !== "boolean")) {
+    return null;
+  }
+  return Object.fromEntries(entries);
+}
+
+function loadLibrary(shell: Shell): Shell {
+  try {
+    const raw = localStorage.getItem(LIBRARY_KEY);
+    if (!raw) {
+      return shell;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) {
+      return shell;
+    }
+    const record = parsed as Record<string, unknown>;
+    const locale: Locale = record.locale === "it" ? "it" : "en";
+    return {
+      ...shell,
+      locale,
+      lastAppByAddress: stringMap(record.lastAppByAddress) ?? shell.lastAppByAddress,
+      quitOnDisconnect: booleanMap(record.quitOnDisconnect) ?? shell.quitOnDisconnect,
+    };
+  } catch {
+    return shell;
+  }
+}
+
 function loadShell(): Shell {
-  const shell = initialShell();
+  const shell = loadLibrary(initialShell());
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
@@ -132,6 +179,11 @@ const overlayNodes = mountStreamOverlay(document.body);
 
 function persist(): void {
   localStorage.setItem(STORAGE_KEY, serializePersisted({ hosts: shell.hosts, settings: shell.settings }));
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify({
+    locale: shell.locale,
+    lastAppByAddress: shell.lastAppByAddress,
+    quitOnDisconnect: shell.quitOnDisconnect,
+  }));
 }
 
 function streamCapturing(): boolean {
@@ -267,28 +319,39 @@ function connectHost(host: SavedHost): void {
   client.connect(signallingUrl(host.address, host.port), host.credentials);
 }
 
-function play(appId: string): void {
-  const phase = shell.link.phase;
-  if (phase.kind !== "online") {
-    return;
-  }
-  const video = fittedPlaySettings();
-  const rejection = settingsRejection(video, phase.snapshot.modes, phase.snapshot.extensions);
-  if (rejection) {
-    apply({ kind: "banner", text: rejection });
-    return;
-  }
-  const running = phase.snapshot.runningAppId;
-  if (running && running !== appId) {
-    if (shell.confirmAppId !== appId) {
-      apply({ kind: "confirm-play", appId });
+function sendCommand(command: SessionCommand): void {
+  if (command.kind === "start-session" || command.kind === "switch-session") {
+    const phase = shell.link.phase;
+    if (phase.kind !== "online") {
       return;
     }
-    apply({ kind: "cancel-confirm" });
-    client.intent({ kind: "switch-app", appId, video });
+    const video = fittedPlaySettings();
+    const rejection = settingsRejection(video, phase.snapshot.modes, phase.snapshot.extensions);
+    if (rejection) {
+      apply({ kind: "banner", text: rejection });
+      return;
+    }
+    client.intent(command.kind === "start-session"
+      ? { kind: "play", appId: command.appId, video }
+      : { kind: "switch-app", appId: command.appId, video });
     return;
   }
-  client.intent({ kind: "play", appId, video });
+  if (command.kind === "stop-session") {
+    client.intent({ kind: "disconnect-stream" });
+    return;
+  }
+  client.intent({ kind: "quit-game" });
+}
+
+function commitLibrary(id: string): void {
+  const next = activateFocused(shell, id);
+  const command = next.command;
+  shell = command ? { ...next, command: null } : next;
+  paint();
+  persist();
+  if (command) {
+    sendCommand(command);
+  }
 }
 
 function activate(id: string): void {
@@ -306,14 +369,6 @@ function activate(id: string): void {
   }
   if (id === "new-pin") {
     client.intent({ kind: "pair", pin: randomPin((bound) => Math.floor(Math.random() * bound)) });
-    return;
-  }
-  if (id === "nav-library") {
-    apply({ kind: "open-library" });
-    return;
-  }
-  if (id === "nav-settings") {
-    apply({ kind: "open-settings" });
     return;
   }
   if (id === "nav-pcs") {
@@ -349,16 +404,12 @@ function activate(id: string): void {
     }
     return;
   }
-  if (id === "setting-audio") {
+  if (id === "setting-audio" || id === "setting-surround") {
     const extensions = onlineSnapshot()?.extensions ?? null;
     const choices = selectableAudio(extensions);
     const current = fitAudio(shell.settings.audioChannels, extensions);
     const next = cycle(choices, current, (item) => item === current);
     apply({ kind: "settings", patch: { audioChannels: next } });
-    return;
-  }
-  if (id === "menu-resume") {
-    apply({ kind: "toggle-menu" });
     return;
   }
   if (id === MENU_STATS_ID) {
@@ -371,20 +422,8 @@ function activate(id: string): void {
     paint();
     return;
   }
-  if (id === "menu-disconnect") {
-    client.intent({ kind: "disconnect-stream" });
-    return;
-  }
-  if (id === "menu-quit") {
-    client.intent({ kind: "quit-game" });
-    return;
-  }
-  if (id === "confirm-play" && shell.confirmAppId) {
-    play(shell.confirmAppId);
-    return;
-  }
-  if (id === "cancel-play") {
-    apply({ kind: "cancel-confirm" });
+  if (isLibraryControl(id)) {
+    commitLibrary(id);
     return;
   }
   const host = /^host-(\d+)$/.exec(id);
@@ -413,10 +452,6 @@ function activate(id: string): void {
       client.close();
     }
     apply({ kind: "hosts", hosts: shell.hosts.filter((item) => item.address !== saved.address) });
-    return;
-  }
-  if (id.startsWith("game-")) {
-    play(id.slice("game-".length));
   }
 }
 
