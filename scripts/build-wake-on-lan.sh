@@ -22,6 +22,14 @@
 #     -s EXTRA_EXPORTED_RUNTIME_METHODS='["ccall"]' \
 #     -o build/wake-on-lan/wake-on-lan.js
 #
+# Ubuntu 26 dropped libxml2.so.2. Samsung's clang is linked to that soname, and
+# libxml2 2.9 pulls in ICU 74. When those libraries are missing, this script
+# downloads the Ubuntu 24.04 packages and puts them on LD_LIBRARY_PATH:
+#   libxml2 2.9.14+dfsg-1.3ubuntu3.10
+#     sha256 c5a065f85c1e6f605741e365e40cad71c3ceb0e85e2791400bd35b8896e12ad1
+#   libicu74 74.2-1ubuntu3.1
+#     sha256 c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8
+#
 # Stock Emscripten 3.1, only when the Samsung SDK cannot be downloaded.
 # Do not ship that binary to a TV; it has no Tizen sockets:
 #   emcc tizen/wasm/wake-on-lan.c -Os -Wall -Wextra -Werror -pthread \
@@ -34,6 +42,17 @@
 #     -s EXPORTED_RUNTIME_METHODS='["ccall"]' \
 #     -o build/wake-on-lan/wake-on-lan.js
 set -euo pipefail
+
+install_host_deb() {
+  local url="$1" sha="$2" pattern="$3" tmp deb
+  tmp="$(mktemp -d)"
+  deb="$tmp/pkg.deb"
+  curl -fL --retry 3 --retry-delay 2 -o "$deb" "$url"
+  echo "$sha  $deb" | sha256sum -c -
+  dpkg-deb -x "$deb" "$tmp/root"
+  find "$tmp/root" -name "$pattern" \( -type f -o -type l \) -exec cp -a {} "$compat/" \;
+  rm -rf "$tmp"
+}
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="${1:-$root/build/wake-on-lan}"
@@ -90,6 +109,27 @@ export EMSDK="$SAMSUNG_EMSDK"
 export EM_CONFIG="$config"
 export EM_CACHE="$SAMSUNG_EMSDK/.emscripten_cache"
 export PATH="$emscripten:$(dirname "$node_bin"):$PATH"
+
+clang="$SAMSUNG_EMSDK/fastcomp/fastcomp/bin/clang++"
+compat="$cache_root/host-libs"
+if ldd "$clang" 2>/dev/null | grep -q 'not found'; then
+  echo "Samsung clang needs Ubuntu 24.04 libxml2 and ICU"
+  mkdir -p "$compat"
+  install_host_deb \
+    "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3.10_amd64.deb" \
+    "c5a065f85c1e6f605741e365e40cad71c3ceb0e85e2791400bd35b8896e12ad1" \
+    "libxml2.so*"
+  install_host_deb \
+    "https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb" \
+    "c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8" \
+    "libicu*.so*"
+  export LD_LIBRARY_PATH="$compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+if ldd "$clang" 2>/dev/null | grep -q 'not found'; then
+  echo "Samsung clang is still missing host libraries:" >&2
+  ldd "$clang" | grep 'not found' >&2
+  exit 1
+fi
 
 mkdir -p "$out"
 source="$root/tizen/wasm/wake-on-lan.c"
