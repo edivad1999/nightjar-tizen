@@ -34,6 +34,11 @@ await build({
 await cp(join(root, "tizen/index.html"), join(stage, "index.html"));
 await cp(join(root, "tizen/ui.css"), join(stage, "ui.css"));
 await cp(join(root, "tizen/config.xml"), join(stage, "config.xml"));
+await mkdir(join(stage, "fonts"), { recursive: true });
+const fontFiles = ["sora-latin.woff2", "figtree-latin.woff2", "martian-mono-latin.woff2"];
+for (const name of fontFiles) {
+  await cp(join(root, "tizen/fonts", name), join(stage, "fonts", name));
+}
 await mkdir(join(stage, "wasm"), { recursive: true });
 await cp(join(root, "tizen/wasm/nightjar-udp.js"), join(stage, "wasm/nightjar-udp.js"));
 for (const name of ["wake-on-lan.js", "wake-on-lan.wasm", "wake-on-lan.worker.js", "wake-on-lan.js.mem"]) {
@@ -47,6 +52,7 @@ const files = [
   "app.js",
   "ui.css",
   "icon.png",
+  ...fontFiles.map((name) => `fonts/${name}`),
   "wasm/nightjar-udp.js",
   "wasm/wake-on-lan.js",
   "wasm/wake-on-lan.wasm",

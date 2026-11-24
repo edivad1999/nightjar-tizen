@@ -2,9 +2,12 @@ import { STEREO_EXTENSIONS } from "../domain/settings.ts";
 import { initialLink, type HostSnapshot } from "../protocol/machine.ts";
 import type { AppEntry } from "../protocol/parse.ts";
 import { initialShell, reduceShell } from "./model.ts";
-import { render } from "./view.ts";
+import { FRAME_INTERPOLATION, applyStreamView } from "./overlay.ts";
+import { shellForShot } from "./shots.ts";
+import { mountStreamOverlay, render, setStreamOverlayVisible } from "./view.ts";
 
 const params = new URLSearchParams(location.search);
+const shot = params.get("shot");
 const screen = params.get("screen") ?? "library";
 const endpoint = params.get("host") ?? "ws://127.0.0.1:8765";
 
@@ -14,6 +17,54 @@ if (!(appNode instanceof HTMLElement)) {
 }
 const appRoot = appNode;
 
+if (shot) {
+  const framed = shellForShot(shot);
+  if (!framed) {
+    appRoot.textContent = `Unknown shot ${shot}`;
+  } else {
+    render(appRoot, framed);
+    if (shot === "overlay") {
+      const nodes = mountStreamOverlay(document.body);
+      setStreamOverlayVisible(true);
+      applyStreamView(nodes, {
+        facts: {
+          app: "Celeste",
+          latency: "18.4 ms",
+          packetLoss: "0.12 % (session 0.40 %)",
+          resolution: "1920x1080",
+          fps: "60",
+          codec: "HEVC (H.265)",
+          bitrate: "20.0 Mbps",
+          hdr: "Off",
+          gamepad: "1",
+          connection: "Connected",
+          interpolation: FRAME_INTERPOLATION,
+          recovery: "No stalls",
+        },
+        performance: {
+          shown: true,
+          buttonLabel: "Hide performance overlay",
+          fps: "59",
+          fpsTarget: "/ 60",
+          fpsLow: false,
+          total: "18.4 ms",
+          average: "17.1 ms",
+          network: "4.2 ms",
+          jitterBuffer: "6.0 ms",
+          decode: "5.1 ms",
+          toScreen: "3.1 ms",
+          packetLoss: "0.12 %",
+          framesDropped: "0",
+        },
+      });
+    }
+    document.body.dataset.ready = "yes";
+    document.body.dataset.screen = framed.screen;
+    document.body.dataset.shot = shot;
+  }
+}
+
+if (!shot) {
 let shell = initialShell();
 shell = reduceShell(shell, {
   kind: "hosts",
@@ -139,3 +190,4 @@ socket.addEventListener("message", (event) => {
 });
 
 paint();
+}

@@ -7,4 +7,4 @@ staging/
 build/
 *.wgt
 tizen/preview.js
-screenshots/
+/screenshots/
