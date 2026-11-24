@@ -29,9 +29,30 @@ export type Credentials = {
   clientSecret: string;
 };
 
+export type EchoedVideo = {
+  width: number;
+  height: number;
+  fps: number;
+  codec: string;
+  bitrateKbps: number;
+  hdr: boolean;
+};
+
+export type EchoedAudio = {
+  channels: number;
+  sampleRate: number | null;
+};
+
 export type ServerMessage =
   | { kind: "discovery"; name: string; port: number; macAddress: string | null }
-  | { kind: "auth-required"; nonce: string; pairing: string; macAddress: string | null }
+  | {
+      kind: "auth-required";
+      nonce: string;
+      pairing: string;
+      macAddress: string | null;
+      sunshineAvailable: boolean | null;
+    }
+  | { kind: "sunshine-availability"; available: boolean }
   | { kind: "authenticated" }
   | { kind: "paired"; clientId: string; clientSecret: string }
   | {
@@ -44,7 +65,14 @@ export type ServerMessage =
   | { kind: "capabilities"; modes: VideoMode[]; extensions: HostExtensions }
   | { kind: "apps"; apps: AppEntry[] }
   | { kind: "app-artwork"; appId: string; available: boolean; mimeType: string | null; data: string | null }
-  | { kind: "session-status"; state: string; sessionId: number | null; message: string | null }
+  | {
+      kind: "session-status";
+      state: string;
+      sessionId: number | null;
+      message: string | null;
+      video: EchoedVideo | null;
+      audio: EchoedAudio | null;
+    }
   | {
       kind: "host-session-status";
       state: string;
@@ -203,9 +231,45 @@ function videoModes(value: unknown): VideoMode[] {
       defaultCodec,
       defaultBitrateKbps: bitrate,
       experimental: item.experimental === true,
+      hdrSupported: item.hdrSupported === true,
+      hdrExperimental: item.hdrExperimental === true,
     });
   }
   return modes;
+}
+
+function echoedVideo(value: unknown): EchoedVideo | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const width = positiveInt(value.width);
+  const height = positiveInt(value.height);
+  const fps = positiveInt(value.fps);
+  const codec = text(value.codec);
+  const bitrateKbps = positiveInt(value.bitrateKbps);
+  const hdr = flag(value.hdr);
+  if (!width || !height || !fps || !codec || !bitrateKbps || hdr === null) {
+    return null;
+  }
+  return { width, height, fps, codec, bitrateKbps, hdr };
+}
+
+function echoedAudio(value: unknown): EchoedAudio | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const channels = positiveInt(value.channels);
+  if (!channels) {
+    return null;
+  }
+  if (value.sampleRate === undefined) {
+    return { channels, sampleRate: null };
+  }
+  const sampleRate = positiveInt(value.sampleRate);
+  if (!sampleRate) {
+    return null;
+  }
+  return { channels, sampleRate };
 }
 
 function apps(value: unknown): AppEntry[] | null {
@@ -266,8 +330,21 @@ export function parseServerMessage(payload: string): ParseResult {
       }
       return {
         ok: true,
-        message: { kind: "auth-required", nonce, pairing, macAddress: optionalText(value.macAddress) },
+        message: {
+          kind: "auth-required",
+          nonce,
+          pairing,
+          macAddress: optionalText(value.macAddress),
+          sunshineAvailable: flag(value.sunshineAvailable),
+        },
       };
+    }
+    case "sunshine-availability": {
+      const available = flag(value.sunshineAvailable);
+      if (available === null) {
+        return { ok: false, code: "invalid-message" };
+      }
+      return { ok: true, message: { kind: "sunshine-availability", available } };
     }
     case "authenticated":
       return { ok: true, message: { kind: "authenticated" } };
@@ -334,7 +411,17 @@ export function parseServerMessage(payload: string): ParseResult {
       if (value.sessionId !== undefined && sessionId === null) {
         return { ok: false, code: "invalid-message" };
       }
-      return { ok: true, message: { kind: "session-status", state, sessionId, message: optionalText(value.message) } };
+      return {
+        ok: true,
+        message: {
+          kind: "session-status",
+          state,
+          sessionId,
+          message: optionalText(value.message),
+          video: echoedVideo(value.video),
+          audio: echoedAudio(value.audio),
+        },
+      };
     }
     case "host-session-status": {
       const state = text(value.state);
@@ -507,9 +594,7 @@ export function clientLogMessage(lines: readonly string[]): ClientLogMessage {
 }
 
 export function isUnsupportedClientLog(message: unknown): boolean {
-  if (!isRecord(message) || message.code !== "unsupported-message") {
-    return false;
-  }
-  const detail = typeof message.message === "string" ? message.message : "";
-  return detail.includes("client-log");
+  return isRecord(message)
+    && message.code === "unsupported-message"
+    && message.requestType === "client-log";
 }

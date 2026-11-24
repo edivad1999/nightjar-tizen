@@ -25,6 +25,8 @@ export type VideoMode = {
   defaultCodec: Codec;
   defaultBitrateKbps: number;
   experimental: boolean;
+  hdrSupported: boolean;
+  hdrExperimental: boolean;
 };
 
 export type InputExtension = {

@@ -257,6 +257,11 @@ export function pairFocus(view: PairView): string {
 
 function screenFor(current: AppScreen, link: LinkState, association: Association): AppScreen {
   const phase = link.phase.kind;
+  const reconnecting = link.resume !== null
+    && (phase === "idle" || phase === "wait-auth" || phase === "authenticating" || phase === "online");
+  if (reconnecting) {
+    return "stream";
+  }
   if (association.kind === "pair") {
     if (association.view.kind === "checking" && current !== "pair") {
       return current;

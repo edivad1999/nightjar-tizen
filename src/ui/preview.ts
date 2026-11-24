@@ -90,6 +90,9 @@ const snapshot: HostSnapshot = {
   stream: { kind: "none" },
   banner: null,
   mouseMode: false,
+  sunshineAvailable: null,
+  negotiated: null,
+  lastStartError: null,
 };
 let placed = false;
 

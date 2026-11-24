@@ -335,8 +335,8 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
       rememberHost(shell.activeAddress, { macAddress });
     }
   },
-  onServerError: (code, message) => {
-    health.noteHostMessage({ code, message });
+  onServerError: (code, message, requestType) => {
+    health.noteHostMessage({ code, message, requestType });
     pairNotice = noticeFor(code, message);
   },
 }, (url) => new WebSocket(url));
@@ -1091,7 +1091,7 @@ window.setInterval(() => {
 }, STALL_SAMPLE_INTERVAL_MS);
 
 window.setInterval(() => {
-  health.flushLogs((message) => client.send(JSON.stringify(message)));
+  health.flushLogs((message) => client.sendAuthenticated(JSON.stringify(message)));
 }, CLIENT_LOG_FLUSH_MS);
 
 paint();

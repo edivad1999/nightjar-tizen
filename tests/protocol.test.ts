@@ -120,8 +120,52 @@ test("hdr is refused for h264 and 720p", () => {
     defaultCodec: "hevc",
     defaultBitrateKbps: 20000,
     experimental: false,
+    hdrSupported: false,
+    hdrExperimental: false,
   };
   assert.equal(settingsRejection({ ...DEFAULT_SETTINGS, hdr: true }, [mode]), "This PC does not offer HDR for that codec");
+});
+
+test("host availability, echoed session settings, and HDR flags are parsed", () => {
+  const required = parseServerMessage(JSON.stringify({
+    version: 2,
+    type: "auth-required",
+    nonce: "ab".repeat(32),
+    pairing: "client-pin",
+    sunshineAvailable: true,
+  }));
+  assert.equal(required.ok && required.message.kind === "auth-required" && required.message.sunshineAvailable, true);
+  const availability = parseServerMessage('{"version":2,"type":"sunshine-availability","sunshineAvailable":false}');
+  assert.equal(availability.ok && availability.message.kind === "sunshine-availability" && availability.message.available, false);
+  assert.equal(parseServerMessage('{"version":2,"type":"sunshine-availability"}').ok, false);
+  const status = parseServerMessage(JSON.stringify({
+    version: 2,
+    type: "session-status",
+    state: "streaming",
+    sessionId: 4,
+    video: { width: 3840, height: 2160, fps: 60, codec: "hevc", bitrateKbps: 50000, hdr: true },
+    audio: { channels: 2, sampleRate: 48000 },
+  }));
+  assert.equal(status.ok && status.message.kind === "session-status" && status.message.video?.hdr, true);
+  assert.equal(status.ok && status.message.kind === "session-status" && status.message.audio?.sampleRate, 48000);
+  const modes = parseServerMessage(JSON.stringify({
+    version: 2,
+    type: "capabilities",
+    videoModes: [{
+      width: 1920,
+      height: 1080,
+      frameRates: [60],
+      codecs: ["hevc"],
+      hdrCodecs: ["hevc"],
+      defaultCodec: "hevc",
+      defaultBitrateKbps: 20000,
+      experimental: false,
+      hdrSupported: true,
+      hdrExperimental: true,
+    }],
+  }));
+  assert.equal(modes.ok && modes.message.kind === "capabilities" && modes.message.modes[0]?.hdrSupported, true);
+  assert.equal(modes.ok && modes.message.kind === "capabilities" && modes.message.modes[0]?.hdrExperimental, true);
 });
 
 test("addresses and pins", () => {

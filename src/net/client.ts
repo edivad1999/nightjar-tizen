@@ -1,13 +1,20 @@
 import { pairingFromStored } from "../domain/pairing.ts";
 import type { AudioChannels } from "../domain/settings.ts";
+import { connectionFailedLine } from "./client-log.ts";
 import { prepareLocalAnswer, prepareRemoteOffer } from "../protocol/sdp.ts";
 import { initialLink, step, type Effect, type Intent, type LinkState, type StepContext } from "../protocol/machine.ts";
-import { parseServerMessage, type Credentials } from "../protocol/parse.ts";
+import { clientLogMessage, parseServerMessage, type Credentials } from "../protocol/parse.ts";
 
 export const RETRY_INTERVAL_MS = 2000;
+export const RESUME_GIVE_UP_MS = 30_000;
+
+export type MediaFailure = {
+  why: string;
+  sdp: string;
+};
 
 export type MediaPeer = {
-  acceptOffer: (sdp: string) => Promise<void>;
+  acceptOffer: (sdp: string, openInput?: boolean) => Promise<void>;
   createAnswer: (channels?: AudioChannels) => Promise<string>;
   addCandidate: (candidate: string, mid: string) => Promise<void>;
   close: () => void;
@@ -15,13 +22,14 @@ export type MediaPeer = {
   sendControl: (text: string) => void;
   setControlHandler: (handler: ((text: string) => void) | null) => void;
   setCandidateHandler: (handler: ((candidate: string, mid: string) => void) | null) => void;
+  setFailureHandler: (handler: ((failure: MediaFailure) => void) | null) => void;
 };
 
 export type ClientHooks = {
   onState: (state: LinkState) => void;
   onCredentials: (credentials: Credentials | null) => void;
   onMac: (macAddress: string) => void;
-  onServerError?: (code: string, message: string) => void;
+  onServerError?: (code: string, message: string, requestType: string) => void;
 };
 
 export class SignallingClient {
@@ -35,6 +43,8 @@ export class SignallingClient {
   private readonly hooks: ClientHooks;
   private readonly connectSocket: (url: string) => WebSocket;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private resumeTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly resumeGiveUpMs: number;
   private stayUrl: string | null = null;
   private stayCredentials: Credentials | null = null;
   private userPinOffer = false;
@@ -44,12 +54,17 @@ export class SignallingClient {
     context: StepContext,
     hooks: ClientHooks,
     connectSocket: (url: string) => WebSocket,
+    options?: { resumeGiveUpMs?: number },
   ) {
     this.peer = peer;
     this.context = context;
     this.hooks = hooks;
     this.connectSocket = connectSocket;
+    this.resumeGiveUpMs = options?.resumeGiveUpMs ?? RESUME_GIVE_UP_MS;
     this.state = initialLink(null);
+    this.peer.setFailureHandler((failure) => {
+      this.reportMediaFailure(failure.why, failure.sdp);
+    });
   }
 
   get link(): LinkState {
@@ -57,13 +72,14 @@ export class SignallingClient {
   }
 
   connect(url: string, credentials: Credentials | null): void {
+    this.clearResumeTimer();
     this.stopRetry();
     this.detachSocket();
     this.resetMedia();
     this.stayUrl = url;
     this.stayCredentials = credentials;
     this.userPinOffer = pairingFromStored(credentials).kind !== "paired";
-    this.openSocket(url, credentials);
+    this.openSocket(url, credentials, false);
   }
 
   send(text: string): boolean {
@@ -78,6 +94,15 @@ export class SignallingClient {
     return true;
   }
 
+  sendAuthenticated(text: string): boolean {
+    const socket = this.socket;
+    if (!this.state.signedIn || !socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    socket.send(text);
+    return true;
+  }
+
   intent(intent: Intent): void {
     this.dispatch(intent);
   }
@@ -85,6 +110,7 @@ export class SignallingClient {
   close(): void {
     this.stayUrl = null;
     this.stayCredentials = null;
+    this.clearResumeTimer();
     this.stopRetry();
     this.detachSocket();
     this.resetMedia();
@@ -118,8 +144,18 @@ export class SignallingClient {
     this.queuedCandidates.length = 0;
   }
 
-  private openSocket(url: string, credentials: Credentials | null): void {
+  private openSocket(url: string, credentials: Credentials | null, carry: boolean): void {
+    const previous = this.state;
     this.state = { ...initialLink(credentials), offerPin: this.userPinOffer };
+    if (carry) {
+      this.state = {
+        ...this.state,
+        resume: previous.resume,
+        launched: previous.launched,
+        sunshineAvailable: previous.sunshineAvailable,
+        macAddress: previous.macAddress,
+      };
+    }
     const socket = this.connectSocket(url);
     this.socket = socket;
     socket.onopen = () => {
@@ -137,16 +173,17 @@ export class SignallingClient {
         return;
       }
       if (parsed.message.kind === "error") {
-        this.hooks.onServerError?.(parsed.message.code, parsed.message.message);
+        this.hooks.onServerError?.(parsed.message.code, parsed.message.message, parsed.message.requestType);
       }
       this.dispatch({ kind: "server", message: parsed.message });
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (this.socket !== socket) {
         return;
       }
       this.socket = null;
-      this.dispatch({ kind: "closed" });
+      const reason = typeof event.reason === "string" ? event.reason : "";
+      this.dispatch({ kind: "closed", code: event.code, reason });
       this.scheduleRetry();
     };
     socket.onerror = () => {
@@ -176,7 +213,7 @@ export class SignallingClient {
       this.userPinOffer = false;
       this.detachSocket();
       this.resetMedia();
-      this.openSocket(url, this.stayCredentials);
+      this.openSocket(url, this.stayCredentials, true);
     }, RETRY_INTERVAL_MS);
   }
 
@@ -213,6 +250,45 @@ export class SignallingClient {
       }
       this.run(effect);
     }
+    this.watchResume();
+  }
+
+  private recovering(): boolean {
+    if (this.state.resume) {
+      return true;
+    }
+    const phase = this.state.phase;
+    return phase.kind === "online"
+      && phase.snapshot.stream.kind === "starting"
+      && phase.snapshot.stream.state === "reconnecting";
+  }
+
+  private watchResume(): void {
+    if (!this.recovering()) {
+      this.clearResumeTimer();
+      return;
+    }
+    if (this.resumeTimer !== null) {
+      return;
+    }
+    this.resumeTimer = setTimeout(() => {
+      this.resumeTimer = null;
+      if (this.recovering()) {
+        this.dispatch({ kind: "resume-timeout" });
+      }
+    }, this.resumeGiveUpMs);
+  }
+
+  private clearResumeTimer(): void {
+    if (this.resumeTimer !== null) {
+      clearTimeout(this.resumeTimer);
+      this.resumeTimer = null;
+    }
+  }
+
+  private reportMediaFailure(why: string, sdp: string): void {
+    this.sendAuthenticated(JSON.stringify(clientLogMessage([connectionFailedLine(why, sdp)])));
+    this.dispatch({ kind: "media-failed", message: `The connection failed: ${why}` });
   }
 
   private run(effect: Effect): void {
@@ -232,7 +308,7 @@ export class SignallingClient {
         this.hooks.onMac(effect.macAddress);
         return;
       case "apply-offer":
-        void this.acceptOffer(effect.sessionId, effect.sdp, effect.channels);
+        void this.acceptOffer(effect.sessionId, effect.sdp, effect.channels, effect.openInput);
         return;
       case "apply-candidate":
         if (this.offerApplied) {
@@ -247,6 +323,10 @@ export class SignallingClient {
         this.queuedCandidates.length = 0;
         this.peer.close();
         return;
+      case "stop-retry":
+        this.stayUrl = null;
+        this.stopRetry();
+        return;
       default: {
         const exhaustive: never = effect;
         return exhaustive;
@@ -254,11 +334,11 @@ export class SignallingClient {
     }
   }
 
-  private async acceptOffer(sessionId: number, sdp: string, channels: AudioChannels = 2): Promise<void> {
+  private async acceptOffer(sessionId: number, sdp: string, channels: AudioChannels = 2, openInput = false): Promise<void> {
     const token = ++this.offerToken;
     this.offerApplied = false;
     try {
-      await this.peer.acceptOffer(prepareRemoteOffer(sdp));
+      await this.peer.acceptOffer(prepareRemoteOffer(sdp), openInput);
       const local = await this.peer.createAnswer(channels);
       if (token !== this.offerToken) {
         return;
@@ -277,7 +357,7 @@ export class SignallingClient {
         return;
       }
       const message = error instanceof Error ? error.message : "The TV could not answer the stream";
-      this.dispatch({ kind: "media-failed", message });
+      this.reportMediaFailure(message, sdp);
     }
   }
 }

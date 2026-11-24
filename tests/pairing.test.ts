@@ -42,6 +42,7 @@ class QuietPeer implements MediaPeer {
   sendControl(): void {}
   setControlHandler(): void {}
   setCandidateHandler(): void {}
+  setFailureHandler(): void {}
 }
 
 function hostOf(address: string, macAddress: string | null, credentials: Credentials | null): SavedHost {

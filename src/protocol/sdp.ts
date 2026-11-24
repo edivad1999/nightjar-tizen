@@ -85,6 +85,57 @@ export function prepareRemoteOffer(sdp: string): string {
   return stripColourSpaceExtension(separateAudioSync(sdp));
 }
 
+export function offeredEndpoint(sdp: string): string {
+  const match = /^a=candidate:\S+ \d+ udp \d+ (\S+) (\d+) typ host/im.exec(sdp);
+  const address = match?.[1];
+  const port = match?.[2];
+  if (!address || !port) {
+    return "unknown:0";
+  }
+  return `${address}:${port}`;
+}
+
+function stereoFmtp(body: string): string {
+  const parts = body.split(";").map((part) => part.trim()).filter((part) => part.length > 0);
+  const named = (name: string) => parts.some((part) => part.split("=")[0]?.trim().toLowerCase() === name);
+  if (!named("stereo")) {
+    parts.push("stereo=1");
+  }
+  if (!named("sprop-stereo")) {
+    parts.push("sprop-stereo=1");
+  }
+  return parts.join(";");
+}
+
+export function rewriteStereoAnswer(sdp: string): string {
+  const nl = newline(sdp);
+  const lines = sdp.split(nl);
+  const opus = /^a=rtpmap:(\d+)\s+opus\/48000\/2(?:\s|$)/i;
+  let payload: string | null = null;
+  let rtpmapIndex = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const found = opus.exec(lines[index] ?? "");
+    const next = found?.[1];
+    if (next) {
+      payload = next;
+      rtpmapIndex = index;
+      break;
+    }
+  }
+  if (!payload || rtpmapIndex < 0) {
+    return sdp;
+  }
+  const fmtpPrefix = `a=fmtp:${payload} `;
+  const fmtpIndex = lines.findIndex((line) => line.toLowerCase().startsWith(fmtpPrefix.toLowerCase()));
+  if (fmtpIndex >= 0) {
+    const current = lines[fmtpIndex] ?? "";
+    lines[fmtpIndex] = `${fmtpPrefix}${stereoFmtp(current.slice(fmtpPrefix.length))}`;
+  } else {
+    lines.splice(rtpmapIndex + 1, 0, `${fmtpPrefix}stereo=1;sprop-stereo=1`);
+  }
+  return lines.join(nl);
+}
+
 export function rewriteSurroundAnswer(sdp: string, channels: 6 | 8): string {
   const nl = newline(sdp);
   const lines = sdp.split(nl);
@@ -122,5 +173,5 @@ export function prepareLocalAnswer(offer: string, answer: string, channels: Audi
   if (channels === 6 || channels === 8) {
     return rewriteSurroundAnswer(prepared, channels);
   }
-  return prepared;
+  return rewriteStereoAnswer(prepared);
 }
