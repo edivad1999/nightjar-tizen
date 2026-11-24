@@ -3,11 +3,12 @@ import { BITRATES_KBPS, CODECS, FRAME_RATES, RESOLUTIONS, hdrAllowed, settingsRe
 import { BrowserPeer } from "../net/browser-peer.ts";
 import { SignallingClient, type MediaPeer } from "../net/client.ts";
 import { connectedMessage, disconnectedMessage, padsEqual, parseHostControl, readPad, stateMessage, type PadAxes, type PadReading } from "../protocol/gamepad.ts";
+import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
 import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, keyframeMessage, parseDiscoveryReply } from "../protocol/parse.ts";
 import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.ts";
 import { parsePersisted, serializePersisted, updateHost, upsertHosts, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
-import { keyAction } from "./keys.ts";
+import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { initialShell, reduceShell, type Shell } from "./model.ts";
 import { render } from "./view.ts";
 
@@ -56,6 +57,10 @@ const streamVideo = videoNode;
 let shell = loadShell();
 let focusItems: FocusItem[] = [];
 const peer = new BrowserPeer(streamVideo);
+const streamInput = new InputSession((text) => peer.sendInput(text));
+const wheel = new Wheel();
+let pointerButtons = 0;
+let capturingInput = false;
 const pads = new Map<number, { sequence: number; last: PadAxes; announced: boolean; lastSent: number }>();
 const artRequested = new Set<string>();
 let wakeToken = 0;
@@ -67,7 +72,29 @@ function persist(): void {
   localStorage.setItem(STORAGE_KEY, serializePersisted({ hosts: shell.hosts, settings: shell.settings }));
 }
 
+function streamCapturing(): boolean {
+  const phase = shell.link.phase;
+  return shell.screen === "stream"
+    && !shell.menuOpen
+    && phase.kind === "online"
+    && phase.snapshot.stream.kind !== "none";
+}
+
+function releaseStreamInput(): void {
+  streamInput.releaseAll();
+  pointerButtons = 0;
+  wheel.reset();
+  if (document.pointerLockElement) {
+    document.exitPointerLock();
+  }
+}
+
 function paint(): void {
+  const capture = streamCapturing();
+  if (capturingInput && !capture) {
+    releaseStreamInput();
+  }
+  capturingInput = capture;
   focusItems = render(appRoot, shell);
   const focus = focusItems.find((item) => item.id === shell.focusId) ?? focusItems[0];
   if (focus) {
@@ -371,7 +398,27 @@ function wakeHost(host: SavedHost): void {
   window.setTimeout(retry, WAKE_INTERVAL_MS);
 }
 
+function keySample(event: KeyboardEvent, type: "keydown" | "keyup"): KeySample {
+  return { type, code: event.code, key: event.key, keyCode: event.keyCode };
+}
+
 document.addEventListener("keydown", (event) => {
+  const outcome = applyStreamKey({
+    capturing: streamCapturing(),
+    event: keySample(event, "keydown"),
+    send: (message) => {
+      streamInput.send(message);
+    },
+  });
+  if (outcome === "menu") {
+    event.preventDefault();
+    apply({ kind: "back" });
+    return;
+  }
+  if (outcome === "sent") {
+    event.preventDefault();
+    return;
+  }
   const action = keyAction(event.code, event.keyCode);
   if (!action) {
     return;
@@ -404,6 +451,73 @@ document.addEventListener("keydown", (event) => {
   if (next) {
     apply({ kind: "focus", id: next });
   }
+});
+
+document.addEventListener("keyup", (event) => {
+  const outcome = applyStreamKey({
+    capturing: streamCapturing(),
+    event: keySample(event, "keyup"),
+    send: (message) => {
+      streamInput.send(message);
+    },
+  });
+  if (outcome === "sent") {
+    event.preventDefault();
+  }
+});
+
+function onPointer(event: PointerEvent): void {
+  if (!streamCapturing() || event.pointerType === "touch" || event.pointerType === "pen") {
+    return;
+  }
+  if (event.type === "pointerdown" && document.pointerLockElement !== streamVideo) {
+    try {
+      const lock = streamVideo.requestPointerLock();
+      void Promise.resolve(lock).catch(() => undefined);
+    } catch {
+      // The TV keeps the absolute pointer when lock is refused.
+    }
+  }
+  const rect = streamVideo.getBoundingClientRect();
+  const messages = pointerMessages({
+    locked: document.pointerLockElement === streamVideo,
+    pointerType: event.pointerType,
+    movementX: event.movementX,
+    movementY: event.movementY,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    buttons: event.buttons,
+    previousButtons: pointerButtons,
+    box: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+    video: { width: streamVideo.videoWidth, height: streamVideo.videoHeight },
+  });
+  pointerButtons = event.buttons;
+  for (const message of messages) {
+    streamInput.send(message);
+  }
+}
+
+document.addEventListener("pointerdown", onPointer);
+document.addEventListener("pointermove", onPointer);
+document.addEventListener("pointerup", onPointer);
+document.addEventListener("pointercancel", onPointer);
+document.addEventListener("wheel", (event) => {
+  if (!streamCapturing()) {
+    return;
+  }
+  event.preventDefault();
+  streamInput.send(wheel.message(event.deltaX, event.deltaY, event.deltaMode));
+}, { passive: false });
+document.addEventListener("compositionend", (event) => {
+  if (!streamCapturing()) {
+    return;
+  }
+  for (const message of textMessages(event.data)) {
+    streamInput.send(message);
+  }
+});
+window.addEventListener("blur", () => {
+  releaseStreamInput();
 });
 
 appRoot.addEventListener("click", (event) => {

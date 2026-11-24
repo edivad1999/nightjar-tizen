@@ -1,3 +1,5 @@
+import { keyMessage, type InputMessage } from "../protocol/input.ts";
+
 export type NavAction = "up" | "down" | "left" | "right" | "activate" | "back" | "exit";
 
 export function keyAction(code: string, keyCode: number): NavAction | null {
@@ -23,4 +25,111 @@ export function keyAction(code: string, keyCode: number): NavAction | null {
     return "exit";
   }
   return null;
+}
+
+export type KeySample = {
+  type: "keydown" | "keyup";
+  code: string;
+  key: string;
+  keyCode: number;
+};
+
+export type StreamKeyDecision =
+  | { kind: "menu" }
+  | { kind: "forward"; code: string; down: boolean }
+  | { kind: "pass" };
+
+/**
+ * Tizen Return is keyCode 10009 (and 461 on some web runtimes). A USB Backspace
+ * is keyCode 8 and is not the stream-menu key.
+ */
+export function isStreamMenuBack(event: { code: string; key: string; keyCode: number }): boolean {
+  if (event.keyCode === 10009 || event.keyCode === 461) {
+    return true;
+  }
+  return event.key === "XF86Back" || event.key === "GoBack" || event.key === "Back";
+}
+
+// The host drops codes it cannot map. Colour keys become F13 to F16.
+const TV_NAMES: Record<string, string> = {
+  Exit: "Escape",
+  XF86Exit: "Escape",
+  Menu: "ContextMenu",
+  ColorF0Red: "F13",
+  ColorF1Green: "F14",
+  ColorF2Yellow: "F15",
+  ColorF3Blue: "F16",
+  XF86Red: "F13",
+  XF86Green: "F14",
+  XF86Yellow: "F15",
+  XF86Blue: "F16",
+};
+
+const KEY_CODES: Record<number, string> = {
+  8: "Backspace",
+  9: "Tab",
+  13: "Enter",
+  27: "Escape",
+  32: "Space",
+  37: "ArrowLeft",
+  38: "ArrowUp",
+  39: "ArrowRight",
+  40: "ArrowDown",
+  403: "F13",
+  404: "F14",
+  405: "F15",
+  406: "F16",
+  10182: "Escape",
+};
+
+function hostKeyCode(event: KeySample): string | null {
+  const named = TV_NAMES[event.code] ?? TV_NAMES[event.key];
+  if (named) {
+    return named;
+  }
+  if (event.code && event.code !== "Unidentified") {
+    return event.code;
+  }
+  // keyCode 18 is Alt on a keyboard, which carries a DOM code, and Menu on the remote, which does not.
+  if (event.keyCode === 18) {
+    return "ContextMenu";
+  }
+  if (event.keyCode >= 48 && event.keyCode <= 57) {
+    return `Digit${event.keyCode - 48}`;
+  }
+  return KEY_CODES[event.keyCode] ?? null;
+}
+
+export function streamKeyDecision(event: KeySample, capturing: boolean): StreamKeyDecision {
+  if (!capturing) {
+    return { kind: "pass" };
+  }
+  if (isStreamMenuBack(event)) {
+    return event.type === "keydown" ? { kind: "menu" } : { kind: "pass" };
+  }
+  const code = hostKeyCode(event);
+  if (!code) {
+    return { kind: "pass" };
+  }
+  return { kind: "forward", code, down: event.type === "keydown" };
+}
+
+export function applyStreamKey(args: {
+  capturing: boolean;
+  event: KeySample;
+  send: (message: InputMessage) => void;
+}): "menu" | "sent" | "pass" {
+  const decision = streamKeyDecision(args.event, args.capturing);
+  if (decision.kind === "menu") {
+    return "menu";
+  }
+  if (decision.kind !== "forward") {
+    return "pass";
+  }
+  const message = keyMessage(decision.code, decision.down);
+  if (!message) {
+    return "pass";
+  }
+  args.send(message);
+  return "sent";
 }
