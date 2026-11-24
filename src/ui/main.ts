@@ -943,7 +943,11 @@ window.setInterval(() => {
   health.flushLogs((message) => client.send(JSON.stringify(message)));
 }, CLIENT_LOG_FLUSH_MS);
 
-const tizen = (globalThis as { tizen?: TizenInput }).tizen;
-tizen?.tvinputdevice?.registerKeyBatch?.(["Exit", "Menu", "Info", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue"]);
-
 paint();
+
+try {
+  const tizen = (globalThis as { tizen?: TizenInput }).tizen;
+  tizen?.tvinputdevice?.registerKeyBatch?.(["Exit", "Menu", "Info", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue"]);
+} catch {
+  // A TV without the tv.inputdevice privilege throws here. The PC list is already painted.
+}
