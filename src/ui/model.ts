@@ -426,7 +426,10 @@ export function runningAppId(shell: Shell): string | null {
   if (!snapshot) {
     return null;
   }
-  return snapshot.runningAppId ?? snapshot.apps.find((app) => app.running)?.id ?? null;
+  if (snapshot.apps.length > 0) {
+    return snapshot.apps.find((app) => app.running)?.id ?? null;
+  }
+  return snapshot.runningAppId;
 }
 
 export function lastAppForHost(shell: Shell, host: SavedHost): string | null {
@@ -747,6 +750,16 @@ function requestPlay(shell: Shell): Shell {
   const snapshot = snapshotOf(shell);
   if (!appId || !snapshot) {
     return shell;
+  }
+  if (snapshot.stream.kind !== "none" && snapshot.stream.appId === appId) {
+    return {
+      ...shell,
+      screen: "stream",
+      menuOpen: false,
+      confirmAppId: null,
+      command: null,
+      selectedAppId: appId,
+    };
   }
   const running = runningAppId(shell);
   if (running && running !== appId) {

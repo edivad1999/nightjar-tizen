@@ -31,19 +31,19 @@ export function releaseTvKeys(tizen: TizenKeys | null | undefined): void {
   }
 }
 
-export function hideAction(streaming: boolean, quitOnDisconnect: boolean): StopCommand | null {
-  if (!streaming) {
+export function hideAction(streaming: boolean, quitOnDisconnect: boolean, recovering = false): StopCommand | null {
+  if (!streaming && !recovering) {
     return null;
   }
   return quitOnDisconnect ? "stop-host-session" : "stop-session";
 }
 
 export function applyHide(
-  input: { streaming: boolean; quitOnDisconnect: boolean },
+  input: { streaming: boolean; quitOnDisconnect: boolean; recovering?: boolean },
   tizen: TizenKeys | null | undefined,
 ): StopCommand | null {
   releaseTvKeys(tizen);
-  return hideAction(input.streaming, input.quitOnDisconnect);
+  return hideAction(input.streaming, input.quitOnDisconnect, input.recovering === true);
 }
 
 export function resumeAction(online: boolean): "reconnect" | "continue" {

@@ -337,7 +337,7 @@ function spoken(shell: Shell, key: StringKey | undefined, fallback: string): str
 }
 
 function appRunning(shell: Shell, app: AppEntry): boolean {
-  return app.running || runningAppId(shell) === app.id;
+  return runningAppId(shell) === app.id;
 }
 
 export function focusMap(shell: Shell): FocusItem[] {
