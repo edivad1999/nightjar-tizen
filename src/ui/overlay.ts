@@ -3,6 +3,10 @@ import type { StallCounters } from "../net/stall.ts";
 
 export const FRAME_INTERPOLATION = "Off";
 
+export function healthOverlayVisible(streaming: boolean, toggled: boolean): boolean {
+  return streaming && toggled;
+}
+
 export type PerformanceHud = {
   shown: boolean;
   buttonLabel: "Show performance overlay" | "Hide performance overlay";

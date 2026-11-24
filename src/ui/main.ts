@@ -42,6 +42,7 @@ import { credentialsForDiscovery, loadPersisted, serializePersisted, shouldWrite
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { activateFocused, addressDraft, addressIssue, initialShell, isLibraryControl, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
+import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import type { Locale } from "./strings.ts";
 import { CONTROLS_KEY, controlPrefs, installControlPrefs, loadControlPrefs, storedControlPrefs, toggleControl } from "./controls-settings.ts";
@@ -508,7 +509,9 @@ function activate(id: string): void {
     return;
   }
   if (id === MENU_STATS_ID) {
-    applyStreamView(overlayNodes, health.togglePerformance());
+    const next = health.togglePerformance();
+    applyStreamView(overlayNodes, next);
+    setStreamOverlayVisible(healthOverlayVisible(shell.screen === "stream", next.performance.shown));
     paint();
     return;
   }
@@ -1043,12 +1046,12 @@ async function readStream(): Promise<void> {
       health.resetSession();
       presentedFrames = 0;
       streamingHealth = false;
-      setStreamOverlayVisible(false);
     }
+    setStreamOverlayVisible(false);
     return;
   }
   streamingHealth = true;
-  setStreamOverlayVisible(true);
+  setStreamOverlayVisible(healthOverlayVisible(true, health.performanceShown()));
   watchPresented();
   readingStream = true;
   let report: RTCStatsReport | null = null;
@@ -1091,7 +1094,11 @@ window.setInterval(() => {
   health.flushLogs((message) => client.send(JSON.stringify(message)));
 }, CLIENT_LOG_FLUSH_MS);
 
-const tizen = (globalThis as { tizen?: TizenInput }).tizen;
-tizen?.tvinputdevice?.registerKeyBatch?.(["Exit", "Menu", "Info", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue"]);
-
 paint();
+
+try {
+  const tizen = (globalThis as { tizen?: TizenInput }).tizen;
+  tizen?.tvinputdevice?.registerKeyBatch?.(["Exit", "Menu", "Info", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue"]);
+} catch {
+  // A TV without the tv.inputdevice privilege throws here. The PC list is already painted.
+}
