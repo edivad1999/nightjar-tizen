@@ -1,14 +1,17 @@
-import { isHostAddress, normalizeMac } from "../domain/ids.ts";
+import { endpointForSave, hostIdentity, hostKey, isHostAddress, normalizeMac } from "../domain/ids.ts";
 import { applySettings, DEFAULT_SETTINGS, isCodec, isFrameRate, type StreamSettings } from "../domain/settings.ts";
 import { isCredentialPair } from "../protocol/auth.ts";
 import type { Credentials } from "../protocol/parse.ts";
 
 export type SavedHost = {
+  id?: string;
   name: string;
   address: string;
   port: number;
   macAddress: string | null;
   credentials: Credentials | null;
+  autoWake?: boolean;
+  nameLocked?: boolean;
 };
 
 export type Persisted = {
@@ -46,12 +49,16 @@ function host(value: unknown): SavedHost | null {
     ? value.port
     : 8000;
   const macAddress = typeof value.macAddress === "string" ? normalizeMac(value.macAddress) : null;
+  const storedId = typeof value.id === "string" ? value.id.trim().slice(0, 80) : "";
   return {
+    id: storedId || hostIdentity(value.address, port, macAddress),
     name: value.name.slice(0, 80) || value.address,
     address: value.address,
     port,
     macAddress,
     credentials: credentials(value.credentials),
+    autoWake: value.autoWake !== false,
+    nameLocked: value.nameLocked === true,
   };
 }
 
@@ -105,20 +112,74 @@ export function serializePersisted(value: Persisted): string {
 }
 
 function samePc(left: SavedHost, right: SavedHost): boolean {
+  if (left.id && right.id && left.id === right.id) {
+    return true;
+  }
   if (left.macAddress && right.macAddress && left.macAddress === right.macAddress) {
     return true;
   }
   return left.address === right.address;
 }
 
+function placeholderName(name: string, address: string, port: number): boolean {
+  return name === address || name === `${address}:${port}`;
+}
+
+function chooseName(current: SavedHost, incoming: SavedHost): string {
+  const incomingName = incoming.name.trim().slice(0, 80);
+  if (incoming.nameLocked === true) {
+    return incomingName || current.name;
+  }
+  if (incoming.nameLocked === false) {
+    return incomingName || incoming.address;
+  }
+  if (current.nameLocked === true) {
+    return current.name;
+  }
+  const currentPlaceholder = placeholderName(current.name, current.address, current.port)
+    || placeholderName(current.name, incoming.address, incoming.port);
+  const incomingPlaceholder = !incomingName
+    || placeholderName(incomingName, incoming.address, incoming.port)
+    || placeholderName(incomingName, current.address, current.port);
+  if (currentPlaceholder && !incomingPlaceholder) {
+    return incomingName;
+  }
+  if (!currentPlaceholder) {
+    return current.name;
+  }
+  return incomingName || current.name;
+}
+
 function foldHost(incoming: SavedHost, matches: readonly SavedHost[]): SavedHost {
-  return matches.reduce<SavedHost>((acc, item) => ({
-    name: acc.name || item.name,
-    address: acc.address,
-    port: acc.port,
-    macAddress: acc.macAddress ?? item.macAddress,
-    credentials: acc.credentials ?? item.credentials,
-  }), incoming);
+  const macAddress = incoming.macAddress ?? matches.find((item) => item.macAddress)?.macAddress ?? null;
+  const id = matches.find((item) => item.id?.trim())?.id
+    ?? incoming.id
+    ?? hostIdentity(incoming.address, incoming.port, macAddress);
+  let name = incoming.name.trim().slice(0, 80) || incoming.address;
+  let nameLocked = incoming.nameLocked;
+  let autoWake = incoming.autoWake;
+  let credentials = incoming.credentials;
+  for (const item of matches) {
+    const proposal: SavedHost = { ...incoming, id, name, nameLocked, autoWake, credentials, macAddress };
+    name = chooseName(item, proposal);
+    if (nameLocked === undefined) {
+      nameLocked = item.nameLocked;
+    }
+    if (autoWake === undefined) {
+      autoWake = item.autoWake;
+    }
+    credentials = credentials ?? item.credentials;
+  }
+  return {
+    id,
+    name,
+    address: incoming.address,
+    port: incoming.port,
+    macAddress,
+    credentials,
+    autoWake: autoWake !== false,
+    nameLocked: nameLocked === true,
+  };
 }
 
 export function upsertHosts(hosts: SavedHost[], incoming: SavedHost[]): SavedHost[] {
@@ -126,7 +187,17 @@ export function upsertHosts(hosts: SavedHost[], incoming: SavedHost[]): SavedHos
   for (const host of incoming) {
     const matches = next.filter((item) => samePc(item, host));
     if (matches.length === 0) {
-      next.push({ ...host });
+      const macAddress = host.macAddress;
+      next.push({
+        id: host.id ?? hostIdentity(host.address, host.port, macAddress),
+        name: host.name.trim().slice(0, 80) || host.address,
+        address: host.address,
+        port: host.port,
+        macAddress,
+        credentials: host.credentials,
+        autoWake: host.autoWake !== false,
+        nameLocked: host.nameLocked === true,
+      });
       continue;
     }
     const merged = foldHost({ ...host }, matches);
@@ -200,6 +271,84 @@ export function writeStorageItem(storage: { setItem(key: string, value: string):
   }
 }
 
-export function updateHost(hosts: SavedHost[], address: string, patch: Partial<SavedHost>): SavedHost[] {
-  return hosts.map((host) => (host.address === address ? { ...host, ...patch, address: patch.address ?? host.address } : host));
+export function updateHost(hosts: SavedHost[], key: string, patch: Partial<SavedHost>): SavedHost[] {
+  return hosts.map((host) => {
+    if (host.address !== key && hostKey(host) !== key) {
+      return host;
+    }
+    return { ...host, ...patch, id: host.id, address: patch.address ?? host.address };
+  });
+}
+
+export function wakesAutomatically(host: SavedHost): boolean {
+  return host.autoWake !== false;
+}
+
+export function entryName(typed: string, address: string, existing: SavedHost | null): { name: string; nameLocked: boolean } {
+  const trimmed = typed.trim().slice(0, 80);
+  if (!trimmed || trimmed === address) {
+    return { name: address, nameLocked: false };
+  }
+  if (existing && trimmed === existing.name) {
+    return { name: trimmed, nameLocked: existing.nameLocked === true };
+  }
+  return { name: trimmed, nameLocked: true };
+}
+
+export function hostFromEntry(input: {
+  typedAddress: string;
+  octets: readonly number[];
+  portDigits: readonly number[];
+  typedName: string;
+  existing: SavedHost | null;
+  autoWake: boolean;
+}): SavedHost | null {
+  const endpoint = endpointForSave(input.typedAddress, { octets: input.octets, portDigits: input.portDigits });
+  if (!endpoint) {
+    return null;
+  }
+  const named = entryName(input.typedName, endpoint.address, input.existing);
+  const macAddress = input.existing?.macAddress ?? null;
+  return {
+    id: input.existing?.id ?? hostIdentity(endpoint.address, endpoint.port, macAddress),
+    name: named.name,
+    address: endpoint.address,
+    port: endpoint.port,
+    macAddress,
+    credentials: input.existing?.credentials ?? null,
+    autoWake: input.autoWake,
+    nameLocked: named.nameLocked,
+  };
+}
+
+export function migrateLibraryKeys(
+  hosts: readonly SavedHost[],
+  lastApp: Record<string, string>,
+  quit: Record<string, boolean>,
+): { lastAppByAddress: Record<string, string>; quitOnDisconnect: Record<string, boolean> } {
+  const lastAppByAddress = { ...lastApp };
+  const quitOnDisconnect = { ...quit };
+  for (const host of hosts) {
+    const id = hostKey(host);
+    if (!id || id === host.address) {
+      continue;
+    }
+    const legacy = lastAppByAddress[host.address];
+    if (legacy && !lastAppByAddress[id]) {
+      lastAppByAddress[id] = legacy;
+      delete lastAppByAddress[host.address];
+    }
+    const prefix = `${host.address}\n`;
+    for (const key of Object.keys(quitOnDisconnect)) {
+      if (!key.startsWith(prefix)) {
+        continue;
+      }
+      const nextKey = `${id}\n${key.slice(prefix.length)}`;
+      if (!(nextKey in quitOnDisconnect)) {
+        quitOnDisconnect[nextKey] = quitOnDisconnect[key] === true;
+      }
+      delete quitOnDisconnect[key];
+    }
+  }
+  return { lastAppByAddress, quitOnDisconnect };
 }

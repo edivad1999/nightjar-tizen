@@ -36,6 +36,16 @@ export function hostsFromReplies(replies: readonly BroadcastReply[]): Discovered
   return found;
 }
 
+export function shouldDiscover(input: { saved: number; screen: string; offline: number; streaming: boolean }): boolean {
+  if (input.streaming) {
+    return false;
+  }
+  if (input.saved <= 0) {
+    return true;
+  }
+  return input.screen === "hosts" && input.offline > 0;
+}
+
 export function collectDiscovery(socket: DiscoverySocket, port: number, timeoutMs: number): Promise<DiscoveredHost[]> {
   const found: DiscoveredHost[] = [];
   const seen = new Set<string>();

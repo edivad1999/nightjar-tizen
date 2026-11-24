@@ -1,4 +1,4 @@
-import { randomPin, signallingUrl } from "../domain/ids.ts";
+import { hostKey, parseTypedEndpoint, randomPin, signallingUrl } from "../domain/ids.ts";
 import { shouldAutoPair } from "../domain/pairing.ts";
 import { frameRateMaximum, probeTv, readVideoReceiverCapabilities, tvReceivesAv1 } from "../domain/probe.ts";
 import {
@@ -20,7 +20,8 @@ import {
 import { BrowserPeer } from "../net/browser-peer.ts";
 import { SignallingClient, type MediaPeer } from "../net/client.ts";
 import { CLIENT_LOG_FLUSH_MS } from "../net/client-log.ts";
-import { DISCOVERY_TIMEOUT_MS, hostsFromReplies, type BroadcastReply } from "../net/discover.ts";
+import { DISCOVERY_TIMEOUT_MS, hostsFromReplies, shouldDiscover, type BroadcastReply } from "../net/discover.ts";
+import { browserWatchSocket, createPresenceWatcher } from "../net/presence.ts";
 import { STALL_SAMPLE_INTERVAL_MS } from "../net/stall.ts";
 import { findInbound, isStatsReport, type StatsReport } from "../net/stats.ts";
 import { parseHostControl, rumblePlay, type RumblePlay } from "../protocol/gamepad.ts";
@@ -37,15 +38,15 @@ import {
 } from "../input/pads.ts";
 import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
 import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
-import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.ts";
-import { credentialsForDiscovery, loadPersisted, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, writeHostCredentials, writeStorageItem, type SavedHost } from "../storage/persist.ts";
+import { magicPacket, stepWakePlay, type WakePlay } from "../protocol/wol.ts";
+import { credentialsForDiscovery, loadPersisted, migrateLibraryKeys, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, wakesAutomatically, writeHostCredentials, writeStorageItem, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { createLaunchTrace } from "./launch-debug.ts";
-import { activateFocused, addressDraft, addressIssue, initialShell, isLibraryControl, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
+import { activateFocused, addressDraft, initialShell, isLibraryControl, lastAppForHost, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
 import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
-import type { Locale } from "./strings.ts";
+import { text, type Locale } from "./strings.ts";
 import { CONTROLS_KEY, controlPrefs, installControlPrefs, loadControlPrefs, storedControlPrefs, toggleControl } from "./controls-settings.ts";
 import { applyLaunchPanel, applyStreamView, mountLaunchPanel, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
 
@@ -187,8 +188,10 @@ let padToken = "";
 let controlWasOpen = false;
 installControlPrefs(loadControlPrefs(localStorage.getItem(CONTROLS_KEY)));
 const artRequested = new Set<string>();
-let wakeToken = 0;
 let searchToken = 0;
+let searching = false;
+let wakePlay: WakePlay | null = null;
+let wakeTimer: number | null = null;
 let probedModes = "";
 let presentedFrames = 0;
 let presentedWatching = false;
@@ -385,6 +388,8 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
         });
       }
     }
+    wakeTick(performance.now());
+    syncWatches();
   },
   onCredentials: (credentials) => {
     shell = {
@@ -403,6 +408,37 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
     pairNotice = noticeFor(code, message);
   },
 }, (url) => new WebSocket(url));
+
+const watcher = createPresenceWatcher({
+  connect: browserWatchSocket,
+  hosts: () => shell.hosts.map((host) => ({ id: hostKey(host), address: host.address, port: host.port })),
+  activeId: () => {
+    const phase = shell.link.phase.kind;
+    if (phase === "idle" || phase === "fault") {
+      return null;
+    }
+    const host = shell.hosts.find((item) => item.address === shell.activeAddress);
+    return host ? hostKey(host) : null;
+  },
+  paused: () => shell.screen === "stream",
+  onUpdate: (update) => {
+    const previous = shell.presence[update.id];
+    if (previous !== update.online) {
+      apply({ kind: "presence", id: update.id, online: update.online });
+    }
+    if (update.macAddress) {
+      apply({ kind: "note-host", id: update.id, macAddress: update.macAddress, hostName: null });
+    }
+    if (previous === true && !update.online && shell.screen === "hosts") {
+      maybeDiscover();
+    }
+    wakeTick(performance.now());
+  },
+});
+
+function syncWatches(): void {
+  watcher.sync();
+}
 
 peer.setControlHandler((text) => {
   const control = parseHostControl(text);
@@ -434,6 +470,156 @@ function connectHost(host: SavedHost): void {
   artRequested.clear();
   apply({ kind: "select-host", address: host.address });
   client.connect(signallingUrl(host.address, host.port), host.credentials);
+  syncWatches();
+}
+
+function offlineCount(): number {
+  return shell.hosts.filter((host) => shell.presence[hostKey(host)] === false).length;
+}
+
+function maybeDiscover(): void {
+  if (searching || !globalThis.NightjarUdp) {
+    return;
+  }
+  if (!shouldDiscover({
+    saved: shell.hosts.length,
+    screen: shell.screen,
+    offline: offlineCount(),
+    streaming: shell.screen === "stream",
+  })) {
+    return;
+  }
+  void search();
+}
+
+function hostById(id: string): SavedHost | null {
+  return shell.hosts.find((item) => hostKey(item) === id) ?? null;
+}
+
+function applyWake(host: SavedHost, effects: { kind: string; appId?: string }[]): void {
+  for (const effect of effects) {
+    if (effect.kind === "magic-packet") {
+      const packet = host.macAddress ? magicPacket(host.macAddress) : null;
+      const bridge = globalThis.NightjarUdp;
+      if (!packet || !bridge || bridge.wake(packet, host.address) === false) {
+        wakePlay = null;
+        apply({ kind: "toast", toast: { kind: "wake-unavailable" } });
+      }
+      continue;
+    }
+    if (effect.kind === "connect") {
+      const current = hostById(hostKey(host)) ?? host;
+      if (wakePlay) {
+        wakePlay = { ...wakePlay, connected: true };
+      }
+      connectHost(current);
+      continue;
+    }
+    if (effect.kind === "start-session" && effect.appId) {
+      startWoken(effect.appId);
+      continue;
+    }
+    if (effect.kind === "unavailable") {
+      apply({ kind: "toast", toast: { kind: "wake-unavailable" } });
+      continue;
+    }
+    if (effect.kind === "give-up") {
+      apply({ kind: "toast", toast: { kind: "error", text: text(shell.locale, "wakeFailed") } });
+    }
+  }
+}
+
+function clearWakeTimer(): void {
+  if (wakeTimer !== null) {
+    window.clearInterval(wakeTimer);
+    wakeTimer = null;
+  }
+}
+
+function wakeTick(now: number): void {
+  if (!wakePlay) {
+    clearWakeTimer();
+    return;
+  }
+  const host = hostById(wakePlay.hostId);
+  if (!host) {
+    wakePlay = null;
+    clearWakeTimer();
+    return;
+  }
+  const online = shell.presence[hostKey(host)] === true
+    || (shell.activeAddress === host.address && shell.link.phase.kind === "online");
+  const stepped = stepWakePlay(wakePlay, { kind: "tick", now, online, phase: shell.link.phase.kind });
+  wakePlay = stepped.state;
+  applyWake(host, stepped.effects);
+  if (!wakePlay) {
+    clearWakeTimer();
+  }
+}
+
+function armWake(): void {
+  if (wakeTimer !== null) {
+    return;
+  }
+  wakeTimer = window.setInterval(() => wakeTick(performance.now()), 250);
+}
+
+function beginWake(host: SavedHost, appId: string | null): void {
+  const now = performance.now();
+  const already = shell.presence[hostKey(host)] === true
+    || (shell.activeAddress === host.address && shell.link.phase.kind === "online");
+  if (already) {
+    if (shell.link.phase.kind === "online" && shell.activeAddress === host.address && appId) {
+      startWoken(appId);
+      return;
+    }
+    wakePlay = { hostId: hostKey(host), appId, since: now, lastMagic: now, connected: false, started: false };
+    wakeTick(now);
+    if (wakePlay) {
+      armWake();
+    }
+    return;
+  }
+  const canWake = Boolean(host.macAddress && magicPacket(host.macAddress) && globalThis.NightjarUdp);
+  const stepped = stepWakePlay(null, { kind: "start", hostId: hostKey(host), appId, now, canWake });
+  wakePlay = stepped.state;
+  applyWake(host, stepped.effects);
+  if (!wakePlay) {
+    return;
+  }
+  apply({ kind: "toast", toast: { kind: "waking", name: host.name } });
+  if (shell.presence[hostKey(host)] === true || (shell.activeAddress === host.address && shell.link.phase.kind === "online")) {
+    wakeTick(performance.now());
+  }
+  if (wakePlay) {
+    armWake();
+  }
+}
+
+function startWoken(appId: string): void {
+  const phase = shell.link.phase;
+  if (phase.kind !== "online") {
+    return;
+  }
+  const video = fittedPlaySettings();
+  const rejection = settingsRejection(video, phase.snapshot.modes, phase.snapshot.extensions);
+  if (rejection) {
+    apply({ kind: "toast", toast: { kind: "error", text: rejection } });
+    return;
+  }
+  client.intent({ kind: "play", appId, video });
+}
+
+function openHost(host: SavedHost): void {
+  const asleep = shell.presence[hostKey(host)] === false && wakesAutomatically(host) && host.macAddress;
+  if (asleep && globalThis.NightjarUdp) {
+    beginWake(host, null);
+    return;
+  }
+  if (asleep) {
+    apply({ kind: "toast", toast: { kind: "wake-unavailable" } });
+  }
+  connectHost(host);
 }
 
 function sendCommand(command: SessionCommand): void {
@@ -504,7 +690,7 @@ function activate(id: string): void {
     apply({ kind: "open-help" });
     return;
   }
-  if (id === "help-done" || id === "pair-cancel" || id === "pair-back" || id === "discover-cancel" || id === "forget-cancel") {
+  if (id === "help-done" || id === "pair-cancel" || id === "pair-back" || id === "discover-cancel" || id === "forget-cancel" || id === "remove-all-cancel") {
     apply({ kind: "back" });
     return;
   }
@@ -530,6 +716,8 @@ function activate(id: string): void {
       apply({ kind: "address-key", key: ":" });
     } else if (key === "hyphen") {
       apply({ kind: "address-key", key: "-" });
+    } else if (key === "space") {
+      apply({ kind: "address-key", key: " " });
     } else {
       apply({ kind: "address-key", key });
     }
@@ -541,7 +729,11 @@ function activate(id: string): void {
   }
   if (id === "nav-pcs") {
     client.close();
+    wakePlay = null;
+    clearWakeTimer();
     apply({ kind: "open-hosts" });
+    syncWatches();
+    maybeDiscover();
     return;
   }
   if (id === "setting-resolution") {
@@ -592,6 +784,14 @@ function activate(id: string): void {
     paint();
     return;
   }
+  if (id === "play-game" || id === "confirm-play") {
+    const current = shell.hosts.find((item) => item.address === shell.activeAddress) ?? null;
+    const appId = shell.selectedAppId ?? shell.confirmAppId;
+    if (current && appId && shell.link.phase.kind !== "online" && shell.presence[hostKey(current)] === false && wakesAutomatically(current)) {
+      beginWake(current, appId);
+      return;
+    }
+  }
   if (isLibraryControl(id)) {
     commitLibrary(id);
     return;
@@ -600,7 +800,7 @@ function activate(id: string): void {
   if (host) {
     const saved = shell.hosts[Number(host[1])];
     if (saved) {
-      connectHost(saved);
+      openHost(saved);
     }
     return;
   }
@@ -609,6 +809,31 @@ function activate(id: string): void {
     const saved = shell.hosts[Number(wake[1])];
     if (saved) {
       wakeHost(saved);
+    }
+    return;
+  }
+  const wakePlayMatch = /^wake-play-(\d+)$/.exec(id);
+  if (wakePlayMatch) {
+    const saved = shell.hosts[Number(wakePlayMatch[1])];
+    const appId = saved ? lastAppForHost(shell, saved) : null;
+    if (saved && appId) {
+      beginWake(saved, appId);
+    }
+    return;
+  }
+  const rename = /^rename-(\d+)$/.exec(id);
+  if (rename) {
+    const saved = shell.hosts[Number(rename[1])];
+    if (saved) {
+      apply({ kind: "edit-host", id: hostKey(saved), field: "name" });
+    }
+    return;
+  }
+  const autoWake = /^auto-wake-(\d+)$/.exec(id);
+  if (autoWake) {
+    const saved = shell.hosts[Number(autoWake[1])];
+    if (saved) {
+      apply({ kind: "toggle-auto-wake", id: hostKey(saved) });
     }
     return;
   }
@@ -625,6 +850,19 @@ function activate(id: string): void {
       client.close();
     }
     apply({ kind: "forget-confirm" });
+    syncWatches();
+    return;
+  }
+  if (id === "remove-all-hosts") {
+    apply({ kind: "ask-remove-all" });
+    return;
+  }
+  if (id === "remove-all-confirm") {
+    client.close();
+    wakePlay = null;
+    clearWakeTimer();
+    apply({ kind: "remove-all-confirm" });
+    syncWatches();
     return;
   }
   const found = /^found-(\d+)$/.exec(id);
@@ -638,58 +876,59 @@ function activate(id: string): void {
 }
 
 function saveAddress(): void {
-  const address = addressDraft(shell).trim();
-  const problem = addressIssue(address);
-  if (problem !== "none") {
-    apply({ kind: "address-problem", problem });
+  const naming = shell.association.kind === "address" && shell.association.field === "name";
+  const parsed = naming ? null : parseTypedEndpoint(addressDraft(shell).trim());
+  apply({ kind: "save-address" });
+  if (naming || !parsed || shell.screen !== "hosts") {
     return;
   }
-  const host: SavedHost = {
-    name: address,
-    address,
-    port: DISCOVERY_PORT,
-    macAddress: null,
-    credentials: null,
-  };
-  const hosts = upsertHosts(shell.hosts, [host]);
-  apply({ kind: "hosts", hosts });
-  const saved = hosts.find((item) => item.address === address);
+  const port = parsed.port ?? DISCOVERY_PORT;
+  const saved = shell.hosts.find((item) => item.address === parsed.address && item.port === port);
   if (saved) {
     connectHost(saved);
   }
 }
 
 async function search(): Promise<void> {
+  if (searching) {
+    return;
+  }
+  searching = true;
   const token = ++searchToken;
   const bridge = globalThis.NightjarUdp;
   apply({ kind: "discover-start" });
-  if (!bridge) {
-    apply({ kind: "discover-blocked" });
-    return;
-  }
-  let replies: BroadcastReply[];
   try {
-    replies = await bridge.broadcast(new TextEncoder().encode(DISCOVER_DATAGRAM), DISCOVERY_PORT, DISCOVERY_TIMEOUT_MS);
-  } catch {
-    if (token === searchToken) {
+    if (!bridge) {
       apply({ kind: "discover-blocked" });
+      return;
     }
-    return;
-  }
-  if (token !== searchToken) {
-    return;
-  }
-  const found = hostsFromReplies(replies);
-  const hosts = upsertHosts(shell.hosts, found.map((item) => ({
-    name: item.name,
-    address: item.address,
-    port: item.port,
-    macAddress: item.macAddress,
-    credentials: credentialsForDiscovery(shell.hosts, item.macAddress),
-  })));
-  apply({ kind: "hosts", hosts });
-  if (shell.screen === "discover") {
-    apply({ kind: "discover-finish", addresses: found.map((item) => item.address) });
+    let replies: BroadcastReply[];
+    try {
+      replies = await bridge.broadcast(new TextEncoder().encode(DISCOVER_DATAGRAM), DISCOVERY_PORT, DISCOVERY_TIMEOUT_MS);
+    } catch {
+      if (token === searchToken) {
+        apply({ kind: "discover-blocked" });
+      }
+      return;
+    }
+    if (token !== searchToken) {
+      return;
+    }
+    const found = hostsFromReplies(replies);
+    const hosts = upsertHosts(shell.hosts, found.map((item) => ({
+      name: item.name,
+      address: item.address,
+      port: item.port,
+      macAddress: item.macAddress,
+      credentials: credentialsForDiscovery(shell.hosts, item.macAddress),
+    })));
+    apply({ kind: "hosts", hosts });
+    syncWatches();
+    if (shell.screen === "discover") {
+      apply({ kind: "discover-finish", addresses: found.map((item) => item.address) });
+    }
+  } finally {
+    searching = false;
   }
 }
 
@@ -698,30 +937,7 @@ function wakeHost(host: SavedHost): void {
     apply({ kind: "toast", toast: { kind: "wake-missing" } });
     return;
   }
-  const packet = magicPacket(host.macAddress);
-  const bridge = globalThis.NightjarUdp;
-  if (!packet || !bridge || bridge.wake(packet, host.address) === false) {
-    apply({ kind: "toast", toast: { kind: "wake-unavailable" } });
-    return;
-  }
-  const token = ++wakeToken;
-  const started = performance.now();
-  apply({ kind: "toast", toast: { kind: "waking", name: host.name } });
-  const retry = () => {
-    if (token !== wakeToken || !wakeShouldRetry(performance.now() - started)) {
-      return;
-    }
-    const phase = shell.link.phase.kind;
-    if (phase === "online" || phase === "pairing" || phase === "authenticating" || phase === "need-pair") {
-      return;
-    }
-    const current = shell.hosts.find((item) => item.address === host.address);
-    if (current) {
-      connectHost(current);
-    }
-    window.setTimeout(retry, WAKE_INTERVAL_MS);
-  };
-  window.setTimeout(retry, WAKE_INTERVAL_MS);
+  beginWake(host, null);
 }
 
 function addressKeyFrom(event: KeyboardEvent): string | null {
@@ -1171,6 +1387,10 @@ window.setInterval(() => {
   health.flushLogs((message) => client.sendAuthenticated(JSON.stringify(message)));
 }, CLIENT_LOG_FLUSH_MS);
 
+const migrated = migrateLibraryKeys(shell.hosts, shell.lastAppByAddress, shell.quitOnDisconnect);
+shell = { ...shell, lastAppByAddress: migrated.lastAppByAddress, quitOnDisconnect: migrated.quitOnDisconnect };
+syncWatches();
+maybeDiscover();
 paint();
 
 try {

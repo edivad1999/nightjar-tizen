@@ -1,7 +1,7 @@
-import { isHostAddress } from "../domain/ids.ts";
+import { hostKey, parseTypedEndpoint } from "../domain/ids.ts";
 import { applySettings, BITRATES_KBPS, DEFAULT_SETTINGS, FRAME_RATES, RESOLUTIONS, settingsRejection, type StreamSettings } from "../domain/settings.ts";
 import { initialLink, type LinkState } from "../protocol/machine.ts";
-import type { SavedHost } from "../storage/persist.ts";
+import { updateHost, upsertHosts, wakesAutomatically, type SavedHost } from "../storage/persist.ts";
 import type { Locale } from "./strings.ts";
 
 export type AppScreen = "hosts" | "add" | "discover" | "pair" | "help" | "library" | "game" | "settings" | "stream";
@@ -15,6 +15,8 @@ export type Toast =
   | { kind: "wake-unavailable" };
 
 export type AddressBoard = "digits" | "letters";
+
+export type AddressField = "address" | "name";
 
 export type AddressProblem = "none" | "empty" | "invalid";
 
@@ -30,9 +32,10 @@ export type PairView =
 
 export type Association =
   | { kind: "browse" }
-  | { kind: "address"; draft: string; board: AddressBoard; problem: AddressProblem }
+  | { kind: "address"; draft: string; board: AddressBoard; problem: AddressProblem; editing: string | null; field: AddressField }
   | { kind: "discover"; phase: "searching" | "none" | "blocked" | "results"; addresses: string[] }
   | { kind: "forget"; address: string }
+  | { kind: "remove-all" }
   | { kind: "help"; returnTo: AppScreen }
   | { kind: "pair"; view: PairView };
 
@@ -69,6 +72,7 @@ export type Shell = {
   command: SessionCommand | null;
   launchDebug: boolean;
   playbackBlocked: boolean;
+  presence: Record<string, boolean>;
 };
 
 export type ShellAction =
@@ -94,6 +98,13 @@ export type ShellAction =
   | { kind: "open-help" }
   | { kind: "ask-forget"; address: string }
   | { kind: "forget-confirm" }
+  | { kind: "ask-remove-all" }
+  | { kind: "remove-all-confirm" }
+  | { kind: "presence"; id: string; online: boolean }
+  | { kind: "note-host"; id: string; macAddress: string | null; hostName: string | null }
+  | { kind: "edit-host"; id: string; field: AddressField }
+  | { kind: "toggle-auto-wake"; id: string }
+  | { kind: "save-address" }
   | { kind: "finish-pair" }
   | { kind: "confirm-play"; appId: string }
   | { kind: "cancel-confirm" }
@@ -129,6 +140,7 @@ export function initialShell(): Shell {
     command: null,
     launchDebug: true,
     playbackBlocked: false,
+    presence: {},
   };
 }
 
@@ -147,6 +159,9 @@ export function hostStatus(shell: Shell, host: SavedHost): HostPresence {
     return "unpaired";
   }
   if (active && phase === "online") {
+    return "online";
+  }
+  if (shell.presence[hostKey(host)] === true) {
     return "online";
   }
   return "offline";
@@ -172,11 +187,16 @@ export function runningAppId(shell: Shell): string | null {
   return snapshot.runningAppId ?? snapshot.apps.find((app) => app.running)?.id ?? null;
 }
 
+export function lastAppForHost(shell: Shell, host: SavedHost): string | null {
+  return shell.lastAppByAddress[hostKey(host)] ?? shell.lastAppByAddress[host.address] ?? null;
+}
+
 export function lastAppId(shell: Shell): string | null {
-  if (!shell.activeAddress) {
+  const host = shell.hosts.find((item) => item.address === shell.activeAddress);
+  if (!host) {
     return null;
   }
-  return shell.lastAppByAddress[shell.activeAddress] ?? null;
+  return lastAppForHost(shell, host);
 }
 
 export function continueAppId(shell: Shell): string | null {
@@ -192,11 +212,20 @@ export function continueAppId(shell: Shell): string | null {
   return null;
 }
 
+function libraryKey(shell: Shell): string | null {
+  const host = shell.hosts.find((item) => item.address === shell.activeAddress);
+  if (!host) {
+    return shell.activeAddress;
+  }
+  return hostKey(host);
+}
+
 function prefKey(shell: Shell, appId: string): string | null {
-  if (!shell.activeAddress) {
+  const key = libraryKey(shell);
+  if (!key) {
     return null;
   }
-  return `${shell.activeAddress}\n${appId}`;
+  return `${key}\n${appId}`;
 }
 
 export function quitOnDisconnectFor(shell: Shell, appId: string | null): boolean {
@@ -216,10 +245,11 @@ export function disconnectCommand(shell: Shell): "stop-session" | "stop-host-ses
 }
 
 function remember(shell: Shell, appId: string): Record<string, string> {
-  if (!shell.activeAddress) {
+  const key = libraryKey(shell);
+  if (!key) {
     return shell.lastAppByAddress;
   }
-  return { ...shell.lastAppByAddress, [shell.activeAddress]: appId };
+  return { ...shell.lastAppByAddress, [key]: appId };
 }
 
 function withCommand(shell: Shell, appId: string, command: SessionCommand): Shell {
@@ -241,7 +271,7 @@ export function addressIssue(draft: string): AddressProblem {
   if (draft.length === 0) {
     return "empty";
   }
-  if (!isHostAddress(draft)) {
+  if (!parseTypedEndpoint(draft)) {
     return "invalid";
   }
   return "none";
@@ -376,10 +406,17 @@ function addressKey(entry: Extract<Association, { kind: "address" }>, key: strin
   if (key === "delete") {
     return { ...entry, draft: entry.draft.slice(0, -1), problem: "none" };
   }
-  if (key.length !== 1 || entry.draft.length >= 253) {
+  const limit = entry.field === "name" ? 80 : 253;
+  if (key === " ") {
+    if (entry.field !== "name" || entry.draft.length >= limit) {
+      return entry;
+    }
+    return { ...entry, draft: `${entry.draft} `, problem: "none" };
+  }
+  if (key.length !== 1 || entry.draft.length >= limit) {
     return entry;
   }
-  const allowed = entry.board === "digits" ? /^[0-9.:]$/ : /^[a-z0-9.:\-[\]]$/;
+  const allowed = entry.field === "name" || entry.board === "letters" ? /^[a-z0-9.:\-[\]]$/ : /^[0-9.:]$/;
   if (!allowed.test(key)) {
     return entry;
   }
@@ -407,6 +444,150 @@ function cycleValue<T>(items: readonly T[], current: T, same: (item: T) => boole
   return items[(index + 1) % items.length] ?? current;
 }
 
+function samePc(left: SavedHost, right: SavedHost): boolean {
+  if (left.id && right.id) {
+    return left.id === right.id;
+  }
+  if (left.macAddress && left.macAddress === right.macAddress) {
+    return true;
+  }
+  return left.address === right.address;
+}
+
+function placeholderName(host: SavedHost): boolean {
+  return host.name === host.address || host.name === `${host.address}:${host.port}`;
+}
+
+function dropHostMemory(shell: Shell, host: SavedHost): Pick<Shell, "lastAppByAddress" | "quitOnDisconnect" | "presence"> {
+  const id = hostKey(host);
+  const lastAppByAddress = { ...shell.lastAppByAddress };
+  delete lastAppByAddress[id];
+  delete lastAppByAddress[host.address];
+  const quitOnDisconnect = { ...shell.quitOnDisconnect };
+  for (const key of Object.keys(quitOnDisconnect)) {
+    if (key.startsWith(`${id}\n`) || key.startsWith(`${host.address}\n`)) {
+      delete quitOnDisconnect[key];
+    }
+  }
+  const presence = { ...shell.presence };
+  delete presence[id];
+  return { lastAppByAddress, quitOnDisconnect, presence };
+}
+
+function noteHost(shell: Shell, id: string, macAddress: string | null, hostName: string | null): Shell {
+  let changed = false;
+  const hosts = shell.hosts.map((host) => {
+    if (hostKey(host) !== id) {
+      return host;
+    }
+    const mac = macAddress ?? host.macAddress;
+    const incoming = hostName?.trim().slice(0, 80) ?? "";
+    const name = !host.nameLocked && placeholderName(host) && incoming ? incoming : host.name;
+    if (mac === host.macAddress && name === host.name) {
+      return host;
+    }
+    changed = true;
+    return { ...host, macAddress: mac, name };
+  });
+  return changed ? { ...shell, hosts } : shell;
+}
+
+function adoptOnlineName(hosts: SavedHost[], active: string | null, link: LinkState): SavedHost[] {
+  if (!active || link.phase.kind !== "online") {
+    return hosts;
+  }
+  const incoming = link.phase.snapshot.hostName.trim().slice(0, 80);
+  if (!incoming) {
+    return hosts;
+  }
+  return hosts.map((host) => {
+    if (host.address !== active || host.nameLocked || !placeholderName(host) || host.name === incoming) {
+      return host;
+    }
+    return { ...host, name: incoming };
+  });
+}
+
+function editHost(shell: Shell, id: string, field: AddressField): Shell {
+  const host = shell.hosts.find((item) => hostKey(item) === id);
+  if (!host) {
+    return shell;
+  }
+  if (field === "name") {
+    const draft = placeholderName(host) ? "" : host.name;
+    return {
+      ...shell,
+      screen: "add",
+      focusId: "key-a",
+      confirmAppId: null,
+      association: { kind: "address", draft, board: "letters", problem: "none", editing: hostKey(host), field: "name" },
+    };
+  }
+  const draft = host.port === 8000
+    ? host.address
+    : host.address.includes(":")
+      ? `[${host.address}]:${host.port}`
+      : `${host.address}:${host.port}`;
+  return {
+    ...shell,
+    screen: "add",
+    focusId: "key-1",
+    confirmAppId: null,
+    association: { kind: "address", draft, board: "digits", problem: "none", editing: hostKey(host), field: "address" },
+  };
+}
+
+function saveAddress(shell: Shell): Shell {
+  if (shell.association.kind !== "address") {
+    return shell;
+  }
+  const entry = shell.association;
+  if (entry.field === "name") {
+    const name = entry.draft.trim().slice(0, 80);
+    if (!name || !entry.editing) {
+      return { ...shell, association: { ...entry, problem: name ? "invalid" : "empty" }, focusId: "save-host" };
+    }
+    return {
+      ...shell,
+      screen: "hosts",
+      focusId: "add-host",
+      association: { kind: "browse" },
+      hosts: updateHost(shell.hosts, entry.editing, { name, nameLocked: true }),
+    };
+  }
+  const parsed = parseTypedEndpoint(entry.draft.trim());
+  if (!parsed) {
+    return {
+      ...shell,
+      association: { ...entry, problem: entry.draft.trim() ? "invalid" : "empty" },
+      focusId: "save-host",
+    };
+  }
+  const port = parsed.port ?? 8000;
+  const existing = shell.hosts.find((item) => entry.editing ? hostKey(item) === entry.editing : item.address === parsed.address) ?? null;
+  const incoming: SavedHost = {
+    id: existing?.id,
+    name: existing?.name ?? parsed.address,
+    address: parsed.address,
+    port,
+    macAddress: existing?.macAddress ?? null,
+    credentials: existing?.credentials ?? null,
+  };
+  if (existing?.autoWake !== undefined) {
+    incoming.autoWake = existing.autoWake;
+  }
+  if (existing?.nameLocked !== undefined) {
+    incoming.nameLocked = existing.nameLocked;
+  }
+  return {
+    ...shell,
+    screen: "hosts",
+    focusId: "add-host",
+    association: { kind: "browse" },
+    hosts: upsertHosts(shell.hosts, [incoming]),
+  };
+}
+
 export function reduceShell(shell: Shell, action: ShellAction): Shell {
   switch (action.kind) {
     case "back": {
@@ -422,7 +603,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.screen === "game") {
         return { ...shell, screen: "library", focusId: "continue-last", command: null };
       }
-      if (shell.association.kind === "forget") {
+      if (shell.association.kind === "forget" || shell.association.kind === "remove-all") {
         return { ...shell, association: { kind: "browse" }, focusId: "add-host" };
       }
       if (shell.association.kind === "help") {
@@ -459,7 +640,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         screen: "add",
         focusId: "key-1",
         confirmAppId: null,
-        association: { kind: "address", draft: "", board: "digits", problem: "none" },
+        association: { kind: "address", draft: "", board: "digits", problem: "none", editing: null, field: "address" },
       };
     case "address-key":
       if (shell.association.kind !== "address") {
@@ -524,14 +705,49 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         return shell;
       }
       const address = shell.association.address;
+      const gone = shell.hosts.find((item) => item.address === address) ?? null;
       return {
         ...shell,
         hosts: shell.hosts.filter((item) => item.address !== address),
         activeAddress: shell.activeAddress === address ? null : shell.activeAddress,
         association: { kind: "browse" },
         focusId: "add-host",
+        ...(gone ? dropHostMemory(shell, gone) : {}),
       };
     }
+    case "ask-remove-all":
+      if (shell.hosts.length === 0) {
+        return shell;
+      }
+      return { ...shell, association: { kind: "remove-all" }, focusId: "remove-all-confirm" };
+    case "remove-all-confirm":
+      if (shell.association.kind !== "remove-all") {
+        return shell;
+      }
+      return {
+        ...initialShell(),
+        settings: shell.settings,
+        locale: shell.locale,
+        launchDebug: shell.launchDebug,
+      };
+    case "presence":
+      if (shell.presence[action.id] === action.online) {
+        return shell;
+      }
+      return { ...shell, presence: { ...shell.presence, [action.id]: action.online } };
+    case "note-host":
+      return noteHost(shell, action.id, action.macAddress, action.hostName);
+    case "edit-host":
+      return editHost(shell, action.id, action.field);
+    case "toggle-auto-wake":
+      return {
+        ...shell,
+        hosts: shell.hosts.map((host) => hostKey(host) === action.id
+          ? { ...host, autoWake: !wakesAutomatically(host) }
+          : host),
+      };
+    case "save-address":
+      return saveAddress(shell);
     case "finish-pair":
       if (shell.link.phase.kind !== "online" || shell.association.kind !== "pair" || shell.association.view.kind !== "paired") {
         return shell;
@@ -563,8 +779,11 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
     }
     case "focus":
       return { ...shell, focusId: action.id };
-    case "hosts":
-      return { ...shell, hosts: action.hosts };
+    case "hosts": {
+      const current = shell.hosts.find((item) => item.address === shell.activeAddress) ?? null;
+      const moved = current ? action.hosts.find((item) => samePc(current, item)) ?? null : null;
+      return { ...shell, hosts: action.hosts, activeAddress: moved ? moved.address : shell.activeAddress };
+    }
     case "select-host": {
       const entry = shell.association.kind === "address" || shell.association.kind === "discover"
         ? { kind: "browse" as const }
@@ -591,7 +810,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         : enteredPair && association.kind === "pair"
           ? pairFocus(association.view)
           : shell.focusId;
-      return { ...shell, link: action.link, screen, menuOpen, toast, association, focusId };
+      return { ...shell, hosts: adoptOnlineName(shell.hosts, shell.activeAddress, action.link), link: action.link, screen, menuOpen, toast, association, focusId };
     }
     case "toast":
       return { ...shell, toast: action.toast };

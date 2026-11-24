@@ -13,11 +13,13 @@ import {
   type HostExtensions,
 } from "../domain/settings.ts";
 import type { AppEntry } from "../protocol/parse.ts";
-import type { SavedHost } from "../storage/persist.ts";
+import { wakesAutomatically, type SavedHost } from "../storage/persist.ts";
 import type { FocusItem } from "./focus.ts";
 import {
   continueAppId,
   hostStatus,
+  lastAppForHost,
+  lastAppId,
   quitOnDisconnectFor,
   resolutionLabel,
   runningAppId,
@@ -278,14 +280,34 @@ export function focusMap(shell: Shell): FocusItem[] {
         { id: "forget-cancel", row: 0, col: 1 },
       ];
     }
+    if (shell.association.kind === "remove-all") {
+      return [
+        { id: "remove-all-confirm", row: 0, col: 0 },
+        { id: "remove-all-cancel", row: 0, col: 1 },
+      ];
+    }
     place(items, "add-host", 0, 0);
     place(items, "search-hosts", 0, 1);
     place(items, "help-hosts", 0, 2);
-    shell.hosts.forEach((_, index) => {
-      place(items, `host-${index}`, index + 1, 0);
-      place(items, `wake-${index}`, index + 1, 1);
-      place(items, `forget-${index}`, index + 1, 2);
+    shell.hosts.forEach((host, index) => {
+      let col = 0;
+      place(items, `host-${index}`, index + 1, col);
+      col += 1;
+      place(items, `wake-${index}`, index + 1, col);
+      col += 1;
+      if (offerWakePlay(shell, host)) {
+        place(items, `wake-play-${index}`, index + 1, col);
+        col += 1;
+      }
+      place(items, `rename-${index}`, index + 1, col);
+      col += 1;
+      place(items, `auto-wake-${index}`, index + 1, col);
+      col += 1;
+      place(items, `forget-${index}`, index + 1, col);
     });
+    if (shell.hosts.length > 0) {
+      place(items, "remove-all-hosts", shell.hosts.length + 1, 0);
+    }
     return items;
   }
   if (shell.screen === "add" && shell.association.kind === "address") {
@@ -299,7 +321,12 @@ export function focusMap(shell: Shell): FocusItem[] {
       place(items, "key-colon", 4, 4);
       place(items, "key-digits", 5, 0);
       place(items, "key-delete", 5, 1);
-      place(items, "save-host", 5, 2);
+      if (shell.association.field === "name") {
+        place(items, "key-space", 6, 0);
+        place(items, "save-host", 7, 0);
+      } else {
+        place(items, "save-host", 5, 2);
+      }
       return items;
     }
     const digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "dot", "0", "colon"];
@@ -308,7 +335,12 @@ export function focusMap(shell: Shell): FocusItem[] {
     });
     place(items, "key-letters", 4, 0);
     place(items, "key-delete", 4, 1);
-    place(items, "save-host", 5, 0);
+    if (shell.association.field === "name") {
+      place(items, "key-space", 5, 0);
+      place(items, "save-host", 6, 0);
+    } else {
+      place(items, "save-host", 5, 0);
+    }
     return items;
   }
   if (shell.screen === "discover" && shell.association.kind === "discover") {
@@ -425,6 +457,20 @@ function shellBar(shell: Shell): HTMLElement {
   return nav;
 }
 
+function hostLine(host: SavedHost): string {
+  if (host.port === 8000) {
+    return host.address;
+  }
+  return host.address.includes(":") ? `[${host.address}]:${host.port}` : `${host.address}:${host.port}`;
+}
+
+function offerWakePlay(shell: Shell, host: SavedHost): boolean {
+  if (!wakesAutomatically(host) || !host.macAddress || !lastAppForHost(shell, host)) {
+    return false;
+  }
+  return !(host.address === shell.activeAddress && shell.link.phase.kind === "online");
+}
+
 function statusName(shell: Shell, host: SavedHost): string {
   const presence = hostStatus(shell, host);
   if (presence === "online") {
@@ -444,7 +490,7 @@ function activeHost(shell: Shell): SavedHost | null {
 }
 
 function quitLabel(shell: Shell): string {
-  const appId = shell.selectedAppId ?? runningAppId(shell) ?? shell.lastAppByAddress[shell.activeAddress ?? ""] ?? null;
+  const appId = shell.selectedAppId ?? runningAppId(shell) ?? lastAppId(shell);
   const app = appById(shell, appId);
   const state = quitOnDisconnectFor(shell, appId) ? say(shell, "on") : say(shell, "off");
   const base = say(shell, "quitOnDisconnect");
@@ -513,16 +559,26 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       const card = el("article", "card host-card");
       card.append(el("h3", "card-title", item.name));
       card.append(chip(hostStatus(shell, item), statusName(shell, item)));
-      card.append(el("p", "muted", item.address));
+      card.append(el("p", "muted", hostLine(item)));
       const row = el("div", "row");
       row.append(
         button(`host-${index}`, item.credentials ? say(shell, "open") : say(shell, "pair"), "button primary"),
         button(`wake-${index}`, say(shell, "wake")),
+      );
+      if (offerWakePlay(shell, item)) {
+        row.append(button(`wake-play-${index}`, say(shell, "wakePlay"), "button primary"));
+      }
+      row.append(
+        button(`rename-${index}`, say(shell, "rename")),
+        button(`auto-wake-${index}`, say(shell, wakesAutomatically(item) ? "autoWakeOn" : "autoWakeOff")),
         button(`forget-${index}`, say(shell, "forget")),
       );
       card.append(row);
       page.append(card);
     });
+    if (shell.hosts.length > 0 && association.kind !== "forget" && association.kind !== "remove-all") {
+      page.append(button("remove-all-hosts", say(shell, "removeAll")));
+    }
     if (association.kind === "forget") {
       const saved = shell.hosts.find((item) => item.address === association.address);
       const name = saved?.name ?? association.address;
@@ -541,24 +597,53 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       scrim.append(dialog);
       page.append(scrim);
     }
+    if (association.kind === "remove-all") {
+      const scrim = el("div", "scrim");
+      const dialog = el("div", "dialog");
+      dialog.role = "dialog";
+      dialog.setAttribute("aria-modal", "true");
+      dialog.append(el("h2", "title", say(shell, "removeAllTitle")));
+      dialog.append(el("p", "lede", say(shell, "removeAllBody")));
+      const row = el("div", "row");
+      row.append(
+        button("remove-all-confirm", say(shell, "removeAllConfirm"), "button primary"),
+        button("remove-all-cancel", say(shell, "cancel")),
+      );
+      dialog.append(row);
+      scrim.append(dialog);
+      page.append(scrim);
+    }
     page.append(el("p", "hint-bar", say(shell, "hintRemote")));
   }
 
   if (shell.screen === "add" && shell.association.kind === "address") {
     const entry = shell.association;
     page.dataset.board = entry.board;
+    page.dataset.field = entry.field;
+    const naming = entry.field === "name";
     const layout = el("div", "address-layout");
     const copy = el("div", "stack");
-    copy.append(el("h2", "title", say(shell, "addTitle")));
-    copy.append(el("p", "lede", say(shell, "addHelp")));
-    const readout = el("p", entry.draft.length === 0 ? "readout is-empty" : "readout", entry.draft.length === 0 ? say(shell, "addressPlaceholder") : entry.draft);
+    copy.append(el("h2", "title", say(shell, naming ? "renameTitle" : "addTitle")));
+    copy.append(el("p", "lede", say(shell, naming ? "renameHelp" : "addHelp")));
+    const empty = entry.draft.length === 0;
+    const readout = el("p", empty ? "readout is-empty" : "readout", empty ? say(shell, naming ? "renamePlaceholder" : "addressPlaceholder") : entry.draft);
     readout.id = "address-readout";
     copy.append(readout);
-    const problem = entry.problem === "empty" ? say(shell, "addressEmpty") : entry.problem === "invalid" ? say(shell, "addressInvalid") : "";
+    const problem = naming
+      ? (entry.problem === "empty" ? say(shell, "renameEmpty") : "")
+      : entry.problem === "empty"
+        ? say(shell, "addressEmpty")
+        : entry.problem === "invalid"
+          ? say(shell, "addressInvalid")
+          : "";
     copy.append(el("p", "problem", problem));
     const keys = el("div", "stack");
-    keys.append(entry.board === "letters" ? letterKeys(shell) : digitKeys(shell));
-    keys.append(button("save-host", say(shell, "connect"), "button primary"));
+    const pad = entry.board === "letters" ? letterKeys(shell) : digitKeys(shell);
+    if (naming) {
+      pad.append(keyButton("key-space", say(shell, "keypadSpace"), "key wide"));
+    }
+    keys.append(pad);
+    keys.append(button("save-host", say(shell, naming ? "saveName" : "connect"), "button primary"));
     layout.append(copy, keys);
     page.append(layout);
   }
