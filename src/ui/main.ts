@@ -1593,6 +1593,7 @@ function onTvHidden(): void {
   releaseStreamInput();
   const command = applyHide({
     streaming: sessionLive(),
+    recovering: client.link.resume !== null,
     quitOnDisconnect: disconnectCommand(shell) === "stop-host-session",
   }, tvHost());
   suspendedStream = command !== null;

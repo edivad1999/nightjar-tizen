@@ -240,6 +240,25 @@ function beginPair(state: LinkState, pinText: string): StepResult {
   ]);
 }
 
+function withRunning(snapshot: HostSnapshot, runningAppId: string | null): HostSnapshot {
+  return {
+    ...snapshot,
+    runningAppId,
+    apps: snapshot.apps.map((app) => ({ ...app, running: app.id === runningAppId })),
+  };
+}
+
+function statusForCurrentStream(stream: StreamPhase, sessionId: number | null, stateName: string): boolean {
+  const current = sessionIdOf(stream);
+  if (sessionId !== null && current !== null) {
+    return sessionId === current;
+  }
+  if (sessionId !== null) {
+    return stateName !== "idle" && stateName !== "stopping" && stateName !== "error";
+  }
+  return current === null;
+}
+
 function applySession(snapshot: HostSnapshot, stateName: string, sessionId: number | null, message: string | null): HostSnapshot {
   if (stateName === "idle") {
     return { ...snapshot, sessionActive: false, stream: { kind: "none" }, banner: null };
@@ -393,21 +412,23 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
       const effects: Effect[] = [];
       let next = rememberMac({ ...state, signedIn: true }, message.macAddress, effects);
       const modes = next.pendingModes ?? [];
-      const snapshot = emptySnapshot(message.gatewayName, modes);
+      let snapshot = emptySnapshot(message.gatewayName, modes);
       snapshot.extensions = next.pendingExtensions ?? STEREO_EXTENSIONS;
       snapshot.sessionActive = message.sessionActive;
-      snapshot.runningAppId = message.runningAppId;
       snapshot.sunshineAvailable = next.sunshineAvailable;
+      snapshot = withRunning(snapshot, message.runningAppId);
       next = { ...next, pendingModes: null, pendingExtensions: null };
       const target = next.resume;
-      if (target) {
+      if (target && message.runningAppId === target.appId) {
         snapshot.audioChannels = target.video.audioChannels;
         snapshot.stream = { kind: "starting", appId: target.appId, state: "reconnecting", sessionId: null };
         effects.push({
           kind: "send",
           text: startSessionMessage(target.appId, videoFields(target.video), target.video.audioChannels),
         });
-        next = { ...next, resume: null };
+        next = { ...next, resume: null, launched: target };
+      } else if (target) {
+        next = { ...next, resume: null, launched: null };
       }
       effects.push({ kind: "send", text: getAppsMessage() });
       return withPhase(next, { kind: "online", snapshot }, effects);
@@ -434,7 +455,8 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
           artwork[app.id] = cover;
         }
       }
-      return replaceSnapshot(state, { ...snapshot, apps: message.apps, artwork });
+      const running = message.apps.find((app) => app.running)?.id ?? null;
+      return replaceSnapshot(state, { ...snapshot, apps: message.apps, artwork, runningAppId: running });
     }
     case "app-artwork": {
       const snapshot = online(state);
@@ -452,7 +474,7 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
     }
     case "session-status": {
       const snapshot = online(state);
-      if (!snapshot) {
+      if (!snapshot || !statusForCurrentStream(snapshot.stream, message.sessionId, message.state)) {
         return same(state);
       }
       const applied = applySession(snapshot, message.state, message.sessionId, message.message);
@@ -471,11 +493,12 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
         return same(state);
       }
       const stopped = message.state === "stopped" || message.state === "failed";
+      const running = stopped ? null : (message.runningAppId ?? snapshot.runningAppId);
+      const marked = withRunning(snapshot, running);
       return replaceSnapshot(
         stopped ? { ...state, launched: null, resume: null } : state,
         {
-          ...snapshot,
-          runningAppId: stopped ? null : (message.runningAppId ?? snapshot.runningAppId),
+          ...marked,
           stream: stopped ? { kind: "none" } : snapshot.stream,
           banner: message.state === "failed" ? (message.message ?? "The PC could not switch games") : snapshot.banner,
         },
@@ -605,6 +628,9 @@ export function step(state: LinkState, intent: Intent, context: StepContext): St
     case "switch-app": {
       const snapshot = online(state);
       if (!snapshot) {
+        return same(state);
+      }
+      if (snapshot.stream.kind !== "none" && snapshot.stream.appId === intent.appId) {
         return same(state);
       }
       const channels = fitAudio(intent.video.audioChannels, snapshot.extensions);
