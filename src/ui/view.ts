@@ -2,35 +2,42 @@ import { frameRateMaximum, readVideoReceiverCapabilities, tvReceivesAv1 } from "
 import {
   BITRATES_KBPS,
   CODECS,
-  RESOLUTIONS,
   codecsFor,
   fitAudio,
   frameRatesFor,
   hdrAllowed,
   lockFrameRate,
+  resolutionChoices,
   selectableAudio,
   type AudioChannels,
   type HostExtensions,
+  type ResolutionChoice,
 } from "../domain/settings.ts";
 import type { AppEntry } from "../protocol/parse.ts";
 import { wakesAutomatically, type SavedHost } from "../storage/persist.ts";
 import type { FocusItem } from "./focus.ts";
 import {
+  appIsFavourite,
+  appIsHidden,
+  appsFor,
+  artworkFor,
   continueAppId,
   hostStatus,
   lastAppForHost,
   lastAppId,
+  libraryLists,
   quitOnDisconnectFor,
   resolutionLabel,
   runningAppId,
   snapshotOf,
+  startFailureKey,
   streamingAppId,
   type PairView,
   type Shell,
 } from "./model.ts";
 import { applyStreamView, type OverlayNodes } from "./overlay.ts";
 import { CONTROL_IDS, controlPrefs, controlRows } from "./controls-settings.ts";
-import { text, type StringKey } from "./strings.ts";
+import { text, type Locale, type StringKey } from "./strings.ts";
 
 export const MENU_STATS_ID = "menu-stats";
 export const MENU_LOGS_ID = "menu-logs";
@@ -71,6 +78,39 @@ let logsOn = false;
 let overlayRoot: HTMLElement | null = null;
 let hudFpsNode: HTMLElement | null = null;
 let hudLatencyNode: HTMLElement | null = null;
+const overlayLabelNodes: HTMLElement[] = [];
+
+const OVERLAY_LABELS = [
+  "overlayStream",
+  "overlayLatency",
+  "overlayLoss",
+  "overlayResolution",
+  "overlayFps",
+  "overlayCodec",
+  "overlayBitrate",
+  "overlayHdr",
+  "overlayGamepad",
+  "overlayConnection",
+  "overlayInterpolation",
+  "overlayRecovery",
+  "overlayLatency",
+  "overlayAverage",
+  "overlayNetwork",
+  "overlayJitter",
+  "overlayDecode",
+  "overlayScreen",
+  "overlayLoss",
+  "overlayDropped",
+] as const;
+
+export function localizeOverlay(locale: Locale): void {
+  overlayLabelNodes.forEach((node, index) => {
+    const key = OVERLAY_LABELS[index];
+    if (key) {
+      node.textContent = text(locale, key);
+    }
+  });
+}
 
 export function setStreamMenuHealth(performance: boolean, logs: boolean): void {
   performanceShown = performance;
@@ -102,8 +142,15 @@ export function mountStreamOverlay(host: ParentNode): OverlayNodes {
   facts.hidden = true;
   overlayRoot = facts;
   const title = el("h2", "", "Stream");
+  overlayLabelNodes.push(title);
   const list = el("dl", "stream-facts");
   const rows = ["Latency", "Packet loss", "Resolution", "FPS", "Codec", "Bitrate", "HDR", "Gamepad", "Connection", "Interpolation", "Recovery"].map(fact);
+  for (const row of rows) {
+    const label = row.querySelector("dt");
+    if (label) {
+      overlayLabelNodes.push(label);
+    }
+  }
   list.append(...rows);
   facts.append(title, list);
   const value = (index: number) => rows[index]?.querySelector("dd") ?? el("dd", "");
@@ -118,6 +165,12 @@ export function mountStreamOverlay(host: ParentNode): OverlayNodes {
   hudLatency.hidden = true;
   hudLatencyNode = hudLatency;
   const cells = ["Latency", "Average", "Network", "Jitter buffer", "Decode", "To screen", "Packet loss", "Dropped"].map(fact);
+  for (const cell of cells) {
+    const label = cell.querySelector("dt");
+    if (label) {
+      overlayLabelNodes.push(label);
+    }
+  }
   hudLatency.append(...cells);
   host.append(facts, hudFps, hudLatency);
   const cell = (index: number) => cells[index]?.querySelector("dd") ?? el("dd", "");
@@ -258,7 +311,27 @@ function appById(shell: Shell, appId: string | null): AppEntry | null {
   if (!appId) {
     return null;
   }
-  return snapshotOf(shell)?.apps.find((app) => app.id === appId) ?? null;
+  return appsFor(shell).find((app) => app.id === appId) ?? null;
+}
+
+const KNOWN_COPY: Record<string, StringKey> = {
+  "HDR needs HEVC or AV1 at 1080p or higher": "issueHdr",
+  "Bitrate must be from 10000 to 100000 kbps": "issueBitrate",
+  "This PC does not offer that resolution": "issueResolution",
+  "This PC does not offer that codec": "issueCodec",
+  "This PC does not offer that frame rate": "issueRate",
+  "This PC does not offer HDR for that codec": "issueHdrCodec",
+  "The PIN must be four digits": "faultPin",
+  "This host does not use a PIN shown on the TV": "faultPairing",
+  "The PC sent credentials this TV cannot store": "faultCredentials",
+};
+
+function spoken(shell: Shell, key: StringKey | undefined, fallback: string): string {
+  if (key) {
+    return say(shell, key);
+  }
+  const known = KNOWN_COPY[fallback];
+  return known ? say(shell, known) : fallback;
 }
 
 function appRunning(shell: Shell, app: AppEntry): boolean {
@@ -271,6 +344,12 @@ export function focusMap(shell: Shell): FocusItem[] {
       { id: "confirm-play", row: 0, col: 0 },
       { id: "cancel-play", row: 0, col: 1 },
     ];
+  }
+  if (shell.startError) {
+    return [{ id: "start-retry", row: 0, col: 0 }];
+  }
+  if (shell.countdown && shell.screen === "library") {
+    return [{ id: "countdown-cancel", row: 0, col: 0 }];
   }
   const items: FocusItem[] = [];
   if (shell.screen === "hosts") {
@@ -404,38 +483,58 @@ export function focusMap(shell: Shell): FocusItem[] {
       place(items, "continue-last", row, 0);
       row += 1;
     }
-    const apps = snapshotOf(shell)?.apps ?? [];
-    apps.forEach((app, index) => {
-      place(items, `game-${app.id}`, row + Math.floor(index / 4), index % 4);
-    });
+    place(items, "library-sort", row, 0);
+    place(items, "library-hidden", row, 1);
+    row += 1;
+    const lists = libraryLists(shell);
+    const placeApps = (apps: AppEntry[]) => {
+      apps.forEach((app, index) => {
+        place(items, `game-${app.id}`, row + Math.floor(index / 4), index % 4);
+      });
+      if (apps.length > 0) {
+        row += Math.floor((apps.length - 1) / 4) + 1;
+      }
+    };
+    placeApps(lists.favourites);
+    placeApps(lists.games);
     return items;
   }
   if (shell.screen === "game") {
     place(items, "play-game", 1, 0);
     const selected = appById(shell, shell.selectedAppId);
+    let row = 2;
     if (selected && appRunning(shell, selected)) {
-      place(items, "quit-game", 2, 0);
+      place(items, "quit-game", row, 0);
+      row += 1;
     }
-    place(items, "setting-quit-on-disconnect", 3, 0);
-    place(items, "leave-game", 4, 0);
+    place(items, "favourite-game", row, 0);
+    place(items, "hide-game", row + 1, 0);
+    place(items, "setting-quit-on-disconnect", row + 2, 0);
+    place(items, "leave-game", row + 3, 0);
     return items;
   }
   place(items, "setting-resolution", 1, 0);
   place(items, "setting-fps", 2, 0);
   place(items, "setting-bitrate", 3, 0);
-  place(items, "setting-more", 4, 0);
+  place(items, "setting-logs", 4, 0);
+  place(items, "setting-more", 5, 0);
   if (shell.moreOpen) {
-    place(items, "setting-codec", 5, 0);
-    place(items, "setting-hdr", 6, 0);
-    let row = 7;
+    place(items, "setting-codec", 6, 0);
+    place(items, "setting-hdr", 7, 0);
+    let row = 8;
     if (selectableAudio(extensionsOf(shell)).length > 1) {
       place(items, "setting-surround", row, 0);
       row += 1;
     }
-    place(items, "setting-quit-on-disconnect", row, 0);
-    place(items, "setting-language", row + 1, 0);
-    place(items, "setting-launch-debug", row + 2, 0);
-    row += 3;
+    place(items, "setting-overlay", row, 0);
+    place(items, "setting-launch", row + 1, 0);
+    place(items, "setting-text-size", row + 2, 0);
+    place(items, "setting-motion", row + 3, 0);
+    place(items, "setting-quit-on-disconnect", row + 4, 0);
+    place(items, "setting-language", row + 5, 0);
+    place(items, "setting-launch-debug", row + 6, 0);
+    place(items, "setting-restore", row + 7, 0);
+    row += 8;
     for (const id of CONTROL_IDS) {
       place(items, id, row, 0);
       row += 1;
@@ -443,7 +542,7 @@ export function focusMap(shell: Shell): FocusItem[] {
     place(items, "setting-help", row, 0);
     return items;
   }
-  place(items, "setting-help", 5, 0);
+  place(items, "setting-help", 6, 0);
   return items;
 }
 
@@ -489,6 +588,47 @@ function activeHost(shell: Shell): SavedHost | null {
   return shell.hosts.find((item) => item.address === shell.activeAddress) ?? null;
 }
 
+function gameGrid(shell: Shell, apps: AppEntry[]): HTMLElement {
+  const grid = el("div", "grid");
+  for (const app of apps) {
+    const card = el("article", appIsHidden(shell, app.id) ? "game-card is-hidden" : "game-card");
+    card.id = `game-${app.id}`;
+    card.dataset.nav = card.id;
+    card.tabIndex = 0;
+    const cover = artworkFor(shell, app.id);
+    if (cover) {
+      const image = el("img", "cover");
+      image.src = cover;
+      image.alt = "";
+      card.append(image);
+    } else {
+      card.append(el("div", "cover fallback", app.title.slice(0, 1).toUpperCase()));
+    }
+    card.append(el("h3", "card-title", app.title));
+    const running = appRunning(shell, app);
+    const chips = el("div", "row");
+    chips.append(chip(running ? "online" : "offline", running ? say(shell, "running") : say(shell, "ready")));
+    if (appIsHidden(shell, app.id)) {
+      chips.append(chip("offline", say(shell, "hiddenMark")));
+    }
+    card.append(chips);
+    grid.append(card);
+  }
+  return grid;
+}
+
+function choiceFor(shell: Shell): ResolutionChoice | null {
+  const choices = resolutionChoices(snapshotOf(shell)?.modes);
+  return choices.find((item) => item.width === shell.settings.width && item.height === shell.settings.height) ?? null;
+}
+
+function resolutionButtonLabel(shell: Shell): string {
+  const choice = choiceFor(shell);
+  const label = choice?.label ?? resolutionLabel(shell.settings);
+  const base = `${say(shell, "resolution")} · ${label}`;
+  return choice?.experimental ? `${base} · ${say(shell, "experimental")}` : base;
+}
+
 function quitLabel(shell: Shell): string {
   const appId = shell.selectedAppId ?? runningAppId(shell) ?? lastAppId(shell);
   const app = appById(shell, appId);
@@ -509,6 +649,9 @@ function streamLine(shell: Shell): string {
 export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   if (typeof document !== "undefined") {
     document.documentElement.lang = shell.locale;
+    document.documentElement.dataset.text = shell.textSize;
+    document.documentElement.dataset.motion = shell.reducedMotion ? "reduce" : "full";
+    localizeOverlay(shell.locale);
   }
   root.replaceChildren();
   const items = focusMap(shell);
@@ -530,9 +673,9 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   bar.append(status);
   page.append(bar);
   if (shell.toast.kind === "info") {
-    page.append(el("p", "toast toast-info", shell.toast.text));
+    page.append(el("p", "toast toast-info", spoken(shell, shell.toast.key, shell.toast.text)));
   } else if (shell.toast.kind === "error") {
-    page.append(el("p", "toast", shell.toast.text));
+    page.append(el("p", "toast", spoken(shell, shell.toast.key, shell.toast.text)));
   } else if (shell.toast.kind === "waking") {
     page.append(el("p", "toast toast-waking", say(shell, "waking", { name: shell.toast.name })));
   } else if (shell.toast.kind === "wake-missing") {
@@ -730,7 +873,7 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   }
 
   if (shell.screen === "library") {
-    const apps = snapshot?.apps ?? [];
+    const lists = libraryLists(shell);
     const continueId = continueAppId(shell);
     const continueApp = appById(shell, continueId);
     if (continueApp) {
@@ -742,30 +885,28 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       );
       page.append(card);
     }
-    if (apps.length === 0) {
+    const tools = el("div", "shelf");
+    tools.append(
+      button("library-sort", say(shell, shell.sort === "title" ? "sortTitle" : "sortPlayed")),
+      button("library-hidden", say(shell, shell.showHidden ? "hideHidden" : "showHidden")),
+    );
+    page.append(tools);
+    if (!snapshot && lists.favourites.length + lists.games.length > 0) {
+      page.append(el("p", "muted", say(shell, "sleepingLibrary")));
+    }
+    if (lists.favourites.length === 0 && lists.games.length === 0) {
       page.append(el("p", "empty", say(shell, "noGames")));
     }
-    const grid = el("div", "grid");
-    for (const app of apps) {
-      const card = el("article", "game-card");
-      card.id = `game-${app.id}`;
-      card.dataset.nav = card.id;
-      card.tabIndex = 0;
-      const cover = snapshot?.artwork[app.id];
-      if (cover) {
-        const image = el("img", "cover");
-        image.src = cover;
-        image.alt = "";
-        card.append(image);
-      } else {
-        card.append(el("div", "cover fallback", app.title.slice(0, 1).toUpperCase()));
-      }
-      card.append(el("h3", "card-title", app.title));
-      const running = appRunning(shell, app);
-      card.append(chip(running ? "online" : "offline", running ? say(shell, "running") : say(shell, "ready")));
-      grid.append(card);
+    if (lists.favourites.length > 0) {
+      page.append(el("h2", "section-label", say(shell, "favourites")));
+      page.append(gameGrid(shell, lists.favourites));
     }
-    page.append(grid);
+    if (lists.games.length > 0) {
+      if (lists.favourites.length > 0) {
+        page.append(el("h2", "section-label", say(shell, "allGames")));
+      }
+      page.append(gameGrid(shell, lists.games));
+    }
     page.append(el("p", "hint-bar", say(shell, "hintRemote")));
   }
 
@@ -773,7 +914,7 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     const app = appById(shell, shell.selectedAppId);
     const panel = el("section", "game-page");
     const hero = el("div", "game-hero");
-    const cover = app ? snapshot?.artwork[app.id] : undefined;
+    const cover = app ? artworkFor(shell, app.id) : null;
     if (cover) {
       const image = el("img", "cover tall");
       image.src = cover;
@@ -797,6 +938,8 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       if (running) {
         copy.append(button("quit-game", say(shell, "quitGame")));
       }
+      copy.append(button("favourite-game", say(shell, appIsFavourite(shell, app.id) ? "favouriteRemove" : "favouriteAdd")));
+      copy.append(button("hide-game", say(shell, appIsHidden(shell, app.id) ? "showGame" : "hideGame")));
       copy.append(el("p", "stream-line", streamLine(shell)));
       copy.append(button("setting-quit-on-disconnect", quitLabel(shell)));
       copy.append(button("leave-game", say(shell, "back")));
@@ -821,31 +964,44 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     const recommended = el("section", "settings-group");
     recommended.dataset.group = "recommended";
     recommended.append(el("h2", "title", say(shell, "recommended")));
-    recommended.append(button("setting-resolution", `${say(shell, "resolution")} · ${resolutionLabel(shell.settings)}`));
+    recommended.append(button("setting-resolution", resolutionButtonLabel(shell)));
     recommended.append(button("setting-fps", `${say(shell, "frameRate")} · ${shownFps} FPS`));
     recommended.append(button("setting-bitrate", `${say(shell, "bitrate")} · ${shell.settings.bitrateKbps / 1000} Mbps`));
-    if (shell.settings.width === 2560) {
-      recommended.append(el("p", "muted", say(shell, "experimental1440")));
+    const currentChoice = choiceFor(shell);
+    if (currentChoice?.experimental) {
+      recommended.append(el("p", "muted", shell.settings.height === 1440 ? say(shell, "experimental1440") : say(shell, "experimental")));
     }
+    const connection = el("section", "settings-group");
+    connection.dataset.group = "connection";
+    connection.append(el("h2", "title", say(shell, "connection")));
+    connection.append(button("setting-logs", `${say(shell, "sendLogs")}: ${shell.sendLogs ? say(shell, "on") : say(shell, "off")}`));
     const more = button("setting-more", say(shell, "moreSettings"));
     more.setAttribute("aria-expanded", shell.moreOpen ? "true" : "false");
     recommended.append(more);
     recommended.append(button("setting-help", say(shell, "openHelp")));
-    page.append(recommended);
+    page.append(recommended, connection);
     page.append(el("p", "hint-bar", say(shell, "hintRemote")));
     if (shell.moreOpen) {
       const extra = el("section", "settings-group");
       extra.dataset.group = "more";
       extra.append(el("h2", "title", say(shell, "more")));
       const codec = button("setting-codec", `${say(shell, "videoCodec")} · ${shell.settings.codec.toUpperCase()}`);
-      const hdr = button("setting-hdr", shell.settings.hdr ? say(shell, "hdrOn") : say(shell, "hdrOff"));
+      const hdrLabel = shell.settings.hdr ? say(shell, "hdrOn") : say(shell, "hdrOff");
+      const hdr = button("setting-hdr", currentChoice?.hdrExperimental && shell.settings.hdr ? `${hdrLabel} · ${say(shell, "experimental")}` : hdrLabel);
       if (!hdrAllowed(shell.settings)) {
         hdr.disabled = true;
       }
       extra.append(codec, hdr);
+      if (currentChoice?.hdrExperimental) {
+        extra.append(el("p", "muted", say(shell, "experimentalHdr")));
+      }
       if (audioChoices.length > 1) {
         extra.append(button("setting-surround", `${say(shell, "surround")} · ${audioName(shell, fitAudio(shell.settings.audioChannels, extensions))}`));
       }
+      extra.append(button("setting-overlay", `${performanceShown ? say(shell, "hideOverlay") : say(shell, "showOverlay")}: ${shell.showOverlay ? say(shell, "on") : say(shell, "off")}`));
+      extra.append(button("setting-launch", `${say(shell, "whenOpens")}: ${shell.launch === "last-game" ? say(shell, "openLastGame") : say(shell, "openPcs")}`));
+      extra.append(button("setting-text-size", `${say(shell, "largerText")}: ${shell.textSize === "large" ? say(shell, "on") : say(shell, "off")}`));
+      extra.append(button("setting-motion", `${say(shell, "reducedMotion")}: ${shell.reducedMotion ? say(shell, "on") : say(shell, "off")}`));
       extra.append(button("setting-quit-on-disconnect", quitLabel(shell)));
       const language = shell.locale === "it" ? say(shell, "italian") : say(shell, "english");
       extra.append(button("setting-language", `${say(shell, "language")} · ${language}`));
@@ -854,12 +1010,14 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       for (const row of controlRows(controlPrefs(), (key) => say(shell, key))) {
         extra.append(button(row.id, row.label));
       }
+      extra.append(button("setting-restore", say(shell, "restoreDefaults")));
       page.append(extra);
     }
     if (!hdrAllowed(shell.settings)) {
       page.append(el("p", "muted", say(shell, "hdrRejected")));
     }
-    page.dataset.resolutions = RESOLUTIONS.map((item) => item.label).join(",");
+    const offered = resolutionChoices(modes);
+    page.dataset.resolutions = offered.map((item) => `${item.width}x${item.height}`).join(",");
     page.dataset.rates = shownRates.join(",");
     page.dataset.bitrates = BITRATES_KBPS.join(",");
     page.dataset.codecs = codecs.join(",");
@@ -893,6 +1051,33 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     }
   }
 
+  if (shell.startError) {
+    const failure = shell.startError;
+    const scrim = el("div", "scrim");
+    const dialog = el("div", "dialog failure-card");
+    dialog.role = "dialog";
+    dialog.setAttribute("aria-modal", "true");
+    dialog.append(el("h2", "title", say(shell, "startFailed")));
+    dialog.append(el("p", "lede", say(shell, startFailureKey(failure.code), { message: failure.message || failure.code })));
+    dialog.append(el("p", "stream-line", streamLine(shell)));
+    dialog.append(button("start-retry", say(shell, "tryAgain"), "button primary"));
+    scrim.append(dialog);
+    page.append(scrim);
+  }
+
+  if (shell.countdown && shell.screen === "library" && !shell.startError) {
+    const app = appById(shell, shell.countdown.appId);
+    const scrim = el("div", "scrim");
+    const dialog = el("div", "dialog countdown-card");
+    dialog.role = "dialog";
+    dialog.setAttribute("aria-modal", "true");
+    dialog.append(el("h2", "title", say(shell, "openingGame", { title: app?.title ?? shell.countdown.appId })));
+    dialog.append(el("p", "countdown-num", say(shell, "countdownSeconds", { seconds: String(shell.countdown.seconds) })));
+    dialog.append(button("countdown-cancel", say(shell, "cancel"), "button primary"));
+    scrim.append(dialog);
+    page.append(scrim);
+  }
+
   if (shell.confirmAppId && (shell.screen === "library" || shell.screen === "game")) {
     const target = appById(shell, shell.confirmAppId);
     const running = appById(shell, runningAppId(shell));
@@ -918,8 +1103,12 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   const current = items.find((item) => item.id === shell.focusId) ?? items[0];
   if (current) {
     const node = document.getElementById(current.id);
-    node?.focus();
-    node?.scrollIntoView({ block: "nearest" });
+    if (shell.reducedMotion) {
+      node?.focus({ preventScroll: true });
+    } else {
+      node?.focus();
+      node?.scrollIntoView({ block: "nearest" });
+    }
   }
   return items;
 }

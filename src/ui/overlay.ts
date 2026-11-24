@@ -1,5 +1,6 @@
 import type { LatencySample } from "../net/stats.ts";
 import type { StallCounters } from "../net/stall.ts";
+import { text } from "./strings.ts";
 
 export const FRAME_INTERPOLATION = "Off";
 
@@ -175,20 +176,42 @@ export type OverlayNodes = {
   latencyPanel: FlagNode;
 };
 
+const OVERLAY_PHRASES = {
+  Recovering: "recovering",
+  "No stalls": "noStalls",
+  unavailable: "unavailable",
+  On: "on",
+  Off: "off",
+  "Show performance overlay": "showOverlay",
+  "Hide performance overlay": "hideOverlay",
+} as const;
+
+function overlayText(value: string): string {
+  const locale = typeof document !== "undefined" && document.documentElement.lang === "it" ? "it" : "en";
+  if (locale === "en") {
+    return value;
+  }
+  if (!Object.hasOwn(OVERLAY_PHRASES, value)) {
+    return value;
+  }
+  const key = OVERLAY_PHRASES[value as keyof typeof OVERLAY_PHRASES];
+  return text(locale, key);
+}
+
 export function applyStreamView(nodes: OverlayNodes, view: StreamHealthView): void {
   nodes.app.textContent = view.facts.app;
   nodes.resolution.textContent = view.facts.resolution;
   nodes.fps.textContent = view.facts.fps;
   nodes.codec.textContent = view.facts.codec;
   nodes.bitrate.textContent = view.facts.bitrate;
-  nodes.hdr.textContent = view.facts.hdr;
+  nodes.hdr.textContent = overlayText(view.facts.hdr);
   nodes.gamepad.textContent = view.facts.gamepad;
   nodes.connection.textContent = view.facts.connection;
-  nodes.interpolation.textContent = view.facts.interpolation;
-  nodes.recovery.textContent = view.facts.recovery;
+  nodes.interpolation.textContent = overlayText(view.facts.interpolation);
+  nodes.recovery.textContent = overlayText(view.facts.recovery);
   nodes.latency.textContent = view.facts.latency;
   nodes.packetLoss.textContent = view.facts.packetLoss;
-  nodes.performanceButton.textContent = view.performance.buttonLabel;
+  nodes.performanceButton.textContent = overlayText(view.performance.buttonLabel);
   nodes.performanceFps.textContent = view.performance.fps;
   nodes.performanceFpsTarget.textContent = view.performance.fpsTarget;
   nodes.performanceTotal.textContent = view.performance.total;
@@ -196,7 +219,7 @@ export function applyStreamView(nodes: OverlayNodes, view: StreamHealthView): vo
   nodes.performanceNetwork.textContent = view.performance.network;
   nodes.performanceJitter.textContent = view.performance.jitterBuffer;
   nodes.performanceDecode.textContent = view.performance.decode;
-  nodes.performanceToScreen.textContent = view.performance.toScreen;
+  nodes.performanceToScreen.textContent = overlayText(view.performance.toScreen);
   nodes.performancePacketLoss.textContent = view.performance.packetLoss;
   nodes.performanceDropped.textContent = view.performance.framesDropped;
   nodes.fpsPanel.hidden = !view.performance.shown;
