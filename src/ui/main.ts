@@ -22,7 +22,18 @@ import { CLIENT_LOG_FLUSH_MS } from "../net/client-log.ts";
 import { DISCOVERY_TIMEOUT_MS, hostsFromReplies, type BroadcastReply } from "../net/discover.ts";
 import { STALL_SAMPLE_INTERVAL_MS } from "../net/stall.ts";
 import { findInbound, isStatsReport, type StatsReport } from "../net/stats.ts";
-import { connectedMessage, disconnectedMessage, padsEqual, parseHostControl, readPad, stateMessage, type PadAxes, type PadReading } from "../protocol/gamepad.ts";
+import { parseHostControl, rumblePlay, type RumblePlay } from "../protocol/gamepad.ts";
+import {
+  beginSession,
+  browserIndexFor,
+  connectedCount,
+  createPads,
+  hapticsFor,
+  rumbleStops,
+  stepPads,
+  type PadEffect,
+  type PadSnapshot,
+} from "../input/pads.ts";
 import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
 import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.ts";
@@ -32,6 +43,7 @@ import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { activateFocused, addressDraft, addressIssue, initialShell, isLibraryControl, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import type { Locale } from "./strings.ts";
+import { CONTROLS_KEY, controlPrefs, installControlPrefs, loadControlPrefs, storedControlPrefs, toggleControl } from "./controls-settings.ts";
 import { applyStreamView, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
 
 const STORAGE_KEY = "nightjar.tizen.v1";
@@ -166,7 +178,10 @@ const streamInput = new InputSession((text) => peer.sendInput(text));
 const wheel = new Wheel();
 let pointerButtons = 0;
 let capturingInput = false;
-const pads = new Map<number, { sequence: number; last: PadAxes; announced: boolean; lastSent: number }>();
+const pads = createPads();
+let padToken = "";
+let controlWasOpen = false;
+installControlPrefs(loadControlPrefs(localStorage.getItem(CONTROLS_KEY)));
 const artRequested = new Set<string>();
 let wakeToken = 0;
 let searchToken = 0;
@@ -320,19 +335,14 @@ peer.setControlHandler((text) => {
     paint();
     return;
   }
-  if (control.kind !== "rumble" || !navigator.getGamepads) {
+  if (control.kind !== "rumble") {
     return;
   }
-  const pad = navigator.getGamepads()[control.controllerId - 1];
-  const actuator = pad?.vibrationActuator;
-  if (actuator && "playEffect" in actuator) {
-    void actuator.playEffect("dual-rumble", {
-      duration: 5000,
-      startDelay: 0,
-      strongMagnitude: control.strongMagnitude,
-      weakMagnitude: control.weakMagnitude,
-    });
+  const haptics = hapticsFor(pads, control.controllerId);
+  if (!haptics) {
+    return;
   }
+  playRumble(control.controllerId, rumblePlay(control, haptics, controlPrefs().rumble));
 });
 
 function connectHost(host: SavedHost): void {
@@ -377,6 +387,13 @@ function commitLibrary(id: string): void {
 }
 
 function activate(id: string): void {
+  const controls = toggleControl(controlPrefs(), id);
+  if (controls) {
+    installControlPrefs(controls);
+    localStorage.setItem(CONTROLS_KEY, storedControlPrefs(controls));
+    paint();
+    return;
+  }
   if (id === "add-host") {
     apply({ kind: "open-add" });
     return;
@@ -725,6 +742,7 @@ function onPointer(event: PointerEvent): void {
     previousButtons: pointerButtons,
     box: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
     video: { width: streamVideo.videoWidth, height: streamVideo.videoHeight },
+    swapButtons: controlPrefs().swapMouseButtons,
   });
   pointerButtons = event.buttons;
   for (const message of messages) {
@@ -766,88 +784,197 @@ appRoot.addEventListener("click", (event) => {
   }
 });
 
-window.setInterval(() => {
+function hapticEffectsOf(pad: Gamepad): readonly string[] | null {
+  const actuator = pad.vibrationActuator as { playEffect?: unknown; effects?: ArrayLike<string> } | null;
+  if (!actuator || typeof actuator.playEffect !== "function") {
+    return null;
+  }
+  if (!actuator.effects || typeof actuator.effects.length !== "number") {
+    return [];
+  }
+  return Array.from(actuator.effects);
+}
+
+function readGamepads(): PadSnapshot[] {
+  if (!navigator.getGamepads) {
+    return [];
+  }
+  const out: PadSnapshot[] = [];
+  for (const pad of navigator.getGamepads()) {
+    if (!pad) {
+      continue;
+    }
+    out.push({
+      index: pad.index,
+      id: pad.id,
+      mapping: pad.mapping,
+      buttons: pad.buttons.map((button) => ({ pressed: button.pressed, value: button.value })),
+      axes: Array.from(pad.axes),
+      hapticEffects: hapticEffectsOf(pad),
+    });
+  }
+  return out;
+}
+
+function playRumble(controllerId: number, command: RumblePlay): void {
   if (!navigator.getGamepads) {
     return;
   }
-  const live = shell.screen === "stream" && !shell.menuOpen && shell.link.phase.kind === "online" && shell.link.phase.snapshot.stream.kind === "live";
-  const seen = new Set<number>();
-  navigator.getGamepads().forEach((pad, index) => {
-    if (!pad) {
+  const index = browserIndexFor(pads, controllerId);
+  if (index === null) {
+    return;
+  }
+  const found = navigator.getGamepads().find((item) => item?.index === index);
+  const actuator = found?.vibrationActuator as {
+    playEffect?: (type: string, params: Record<string, number>) => unknown;
+    reset?: () => unknown;
+  } | undefined;
+  if (!actuator) {
+    return;
+  }
+  if (command.kind === "stop") {
+    void actuator.reset?.();
+    return;
+  }
+  const params: Record<string, number> = {
+    duration: command.duration,
+    startDelay: 0,
+    strongMagnitude: command.strongMagnitude,
+    weakMagnitude: command.weakMagnitude,
+  };
+  if (command.kind === "trigger-rumble") {
+    params.leftTrigger = command.leftTrigger;
+    params.rightTrigger = command.rightTrigger;
+  }
+  void actuator.playEffect?.(command.kind, params);
+}
+
+function streamToken(): string {
+  const phase = shell.link.phase;
+  if (phase.kind !== "online") {
+    return "";
+  }
+  const stream = phase.snapshot.stream;
+  if (stream.kind === "none") {
+    return "";
+  }
+  return stream.sessionId === null ? "pending" : String(stream.sessionId);
+}
+
+function syncPadSession(): void {
+  const token = streamToken();
+  if (token !== padToken) {
+    if (padToken !== "") {
+      for (const stop of rumbleStops(pads)) {
+        playRumble(stop.controllerId, { kind: "stop" });
+      }
+    }
+    if (token !== "") {
+      beginSession(pads);
+    }
+    padToken = token;
+  }
+  const open = peer.controlOpen();
+  if (open && !controlWasOpen) {
+    beginSession(pads);
+  }
+  controlWasOpen = open;
+}
+
+function shellTab(): "library" | "settings" | "pcs" {
+  if (shell.screen === "settings") {
+    return "settings";
+  }
+  if (shell.screen === "hosts" || shell.screen === "add" || shell.screen === "pair" || shell.screen === "discover") {
+    return "pcs";
+  }
+  return "library";
+}
+
+function applyPadEffect(effect: PadEffect): void {
+  switch (effect.kind) {
+    case "control":
+      peer.sendControl(effect.text);
+      return;
+    case "gamepad":
+      peer.sendGamepad(effect.text);
+      return;
+    case "menu":
+      apply({ kind: "toggle-menu" });
+      return;
+    case "overlay":
+      applyStreamView(overlayNodes, health.togglePerformance());
+      paint();
+      return;
+    case "back":
+      apply({ kind: "back" });
+      return;
+    case "activate": {
+      const id = document.activeElement instanceof HTMLElement ? document.activeElement.id : (shell.focusId ?? "");
+      if (id) {
+        activate(id);
+      }
       return;
     }
-    seen.add(index);
-    const reading: PadReading = {
-      buttons: pad.buttons.map((button) => ({ pressed: button.pressed, value: button.value })),
-      axes: Array.from(pad.axes),
-      id: pad.id,
-      mapping: pad.mapping,
-    };
-    const axes = readPad(reading);
-    const controllerId = index + 1;
-    let record = pads.get(index);
-    if (!record) {
-      record = { sequence: 0, last: axes, announced: false, lastSent: 0 };
-      pads.set(index, record);
-    }
-    const previous = record.last.buttons;
-    if (!live) {
-      record.last = axes;
-      if ((axes.buttons & (1 << 9)) !== 0 && (previous & (1 << 9)) === 0 && shell.screen === "stream") {
-        apply({ kind: "toggle-menu" });
-        return;
+    case "options":
+      if (shell.screen === "settings") {
+        apply({ kind: "toggle-more" });
+      } else if (shell.screen !== "stream") {
+        apply({ kind: "open-settings" });
       }
-      if ((axes.buttons & 1) !== 0 && (previous & 1) === 0) {
-        const id = document.activeElement instanceof HTMLElement ? document.activeElement.id : "";
-        if (id) {
-          activate(id);
+      return;
+    case "tab": {
+      const order = ["library", "settings", "pcs"] as const;
+      const index = order.indexOf(shellTab());
+      const step = effect.direction === "next" ? 1 : order.length - 1;
+      const next = order[(index + step) % order.length] ?? "library";
+      if (next === "library") {
+        apply({ kind: "open-library" });
+      } else if (next === "settings") {
+        apply({ kind: "open-settings" });
+      } else {
+        if (shell.screen !== "hosts" && shell.screen !== "add" && shell.screen !== "pair" && shell.screen !== "discover") {
+          client.close();
         }
-      }
-      const dpad = dpadDirection(axes.buttons, previous);
-      if (dpad) {
-        const next = moveFocus(focusItems, shell.focusId, dpad);
-        if (next) {
-          apply({ kind: "focus", id: next });
-        }
+        apply({ kind: "open-hosts" });
       }
       return;
     }
-    if (!record.announced) {
-      peer.sendControl(connectedMessage(controllerId, reading));
-      record.announced = true;
+    case "move": {
+      const next = moveFocus(focusItems, shell.focusId, effect.direction);
+      if (next) {
+        apply({ kind: "focus", id: next });
+      }
+      return;
     }
-    const changed = !padsEqual(record.last, axes);
-    if (changed || performance.now() - record.lastSent > 250) {
-      record.sequence += 1;
-      record.lastSent = performance.now();
-      peer.sendGamepad(stateMessage(controllerId, record.sequence, performance.now(), axes));
-      record.last = axes;
+    default: {
+      const exhaustive: never = effect;
+      return exhaustive;
     }
+  }
+}
+
+window.setInterval(() => {
+  syncPadSession();
+  const phase = shell.link.phase;
+  const stream = phase.kind === "online" ? phase.snapshot.stream : null;
+  const streaming = stream !== null && stream.kind !== "none";
+  const live = shell.screen === "stream" && !shell.menuOpen && stream?.kind === "live";
+  const effects = stepPads(pads, readGamepads(), {
+    now: performance.now(),
+    live,
+    streaming,
+    onStream: shell.screen === "stream",
+    tabs: shell.screen === "library" || shell.screen === "game" || shell.screen === "settings",
+    bufferedAmount: peer.gamepadBufferedAmount(),
+    controlOpen: peer.controlOpen(),
+    gamepadOpen: peer.gamepadOpen(),
+    controls: controlPrefs(),
   });
-  for (const [index, record] of pads) {
-    if (!seen.has(index) && record.announced) {
-      peer.sendControl(disconnectedMessage(index + 1));
-      pads.delete(index);
-    }
+  for (const effect of effects) {
+    applyPadEffect(effect);
   }
 }, 16);
-
-function dpadDirection(buttons: number, previous: number): "up" | "down" | "left" | "right" | null {
-  const press = (bit: number) => (buttons & bit) !== 0 && (previous & bit) === 0;
-  if (press(1 << 10)) {
-    return "up";
-  }
-  if (press(1 << 11)) {
-    return "down";
-  }
-  if (press(1 << 12)) {
-    return "left";
-  }
-  if (press(1 << 13)) {
-    return "right";
-  }
-  return null;
-}
 
 function streamContext(): StreamContext {
   const phase = shell.link.phase;
@@ -864,8 +991,8 @@ function streamContext(): StreamContext {
     hdr: shell.settings.hdr,
     videoWidth: streamVideo.videoWidth,
     videoHeight: streamVideo.videoHeight,
-    gamepadConnected: pads.size > 0,
-    gamepadLabel: pads.size > 0 ? "Connected" : "Disconnected",
+    gamepadConnected: connectedCount(pads) > 0,
+    gamepadLabel: connectedCount(pads) > 0 ? "Connected" : "Disconnected",
     connection: phase.kind,
   };
 }

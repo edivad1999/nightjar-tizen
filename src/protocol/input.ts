@@ -75,14 +75,27 @@ export function positionMessage(clientX: number, clientY: number, box: Box, vide
 /** DOM button bits. Middle and right swap places in `MouseEvent.buttons`. */
 const BUTTON_BITS = [1, 4, 2, 8, 16];
 
-export function buttonChanges(previous: number, current: number): InputMessage[] {
+function protocolButton(button: number, swapButtons: boolean): number {
+  if (!swapButtons) {
+    return button;
+  }
+  if (button === 0) {
+    return 2;
+  }
+  if (button === 2) {
+    return 0;
+  }
+  return button;
+}
+
+export function buttonChanges(previous: number, current: number, swapButtons = false): InputMessage[] {
   const out: InputMessage[] = [];
   for (let button = 0; button < BUTTON_BITS.length; button += 1) {
     const bit = BUTTON_BITS[button] ?? 0;
     if ((previous & bit) === (current & bit)) {
       continue;
     }
-    const message = mouseButtonMessage(button, (current & bit) !== 0);
+    const message = mouseButtonMessage(protocolButton(button, swapButtons), (current & bit) !== 0);
     if (message) {
       out.push(message);
     }
@@ -101,6 +114,8 @@ export type PointerSample = {
   previousButtons: number;
   box: Box;
   video: Size;
+  /** When set, the left and right buttons trade places in the messages sent to the PC. */
+  swapButtons?: boolean;
 };
 
 export function pointerMessages(sample: PointerSample): InputMessage[] {
@@ -119,7 +134,7 @@ export function pointerMessages(sample: PointerSample): InputMessage[] {
       out.push(position);
     }
   }
-  out.push(...buttonChanges(sample.previousButtons, sample.buttons));
+  out.push(...buttonChanges(sample.previousButtons, sample.buttons, sample.swapButtons === true));
   return out;
 }
 
