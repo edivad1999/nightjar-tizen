@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { inflateRawSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { missingPrivileges } from "./privileges.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packed = readFileSync(join(root, "dist/nightjar.wgt"));
@@ -73,7 +74,12 @@ function widgetVersion(xml) {
   return match[1];
 }
 
-const packedVersion = widgetVersion(files.find((file) => file.name === "config.xml").data.toString("utf8"));
+const packedXml = files.find((file) => file.name === "config.xml").data.toString("utf8");
+const missing = missingPrivileges(packedXml);
+if (missing.length > 0) {
+  throw new Error(`wgt config.xml is missing privileges: ${missing.join(", ")}`);
+}
+const packedVersion = widgetVersion(packedXml);
 const sourceVersion = widgetVersion(readFileSync(join(root, "tizen/config.xml"), "utf8"));
 if (packedVersion !== sourceVersion) {
   throw new Error(`wgt version ${packedVersion} does not match tizen/config.xml ${sourceVersion}`);
