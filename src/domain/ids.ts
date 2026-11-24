@@ -111,6 +111,109 @@ export function signallingUrl(address: string, port: number): string {
   return `ws://${host}:${port}`;
 }
 
+export type OctetList = [number, number, number, number];
+export type PortDigitList = [number, number, number, number, number];
+
+export function isPort(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+
+export function hostKey(host: { id?: string | null; address: string }): string {
+  const id = host.id?.trim();
+  return id ? id : host.address;
+}
+
+export function hostIdentity(address: string, port: number, mac: string | null): string {
+  if (mac) {
+    return `mac:${mac}`;
+  }
+  return `addr:${address}:${port}`;
+}
+
+export function adjustOctet(value: number, direction: 1 | -1): number {
+  const current = Number.isInteger(value) ? value : 0;
+  return (current + direction + 256) % 256;
+}
+
+export function adjustDigit(value: number, direction: 1 | -1): number {
+  const current = Number.isInteger(value) ? value : 0;
+  return (current + direction + 10) % 10;
+}
+
+export function parseOctets(address: string): OctetList | null {
+  if (!isIpv4(address)) {
+    return null;
+  }
+  const parts = address.split(".").map((part) => Number(part));
+  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0, parts[3] ?? 0];
+}
+
+export function formatOctets(octets: readonly number[]): string {
+  return [0, 1, 2, 3].map((index) => String(octets[index] ?? 0)).join(".");
+}
+
+export function portDigits(port: number): PortDigitList {
+  const text = String(isPort(port) ? port : 8000).padStart(5, "0").slice(-5);
+  return [0, 1, 2, 3, 4].map((index) => Number(text[index] ?? "0")) as PortDigitList;
+}
+
+export function portFromDigits(digits: readonly number[]): number {
+  return Number([0, 1, 2, 3, 4].map((index) => String(digits[index] ?? 0)).join(""));
+}
+
+export function parseTypedEndpoint(value: string): { address: string; port: number | null } | null {
+  const text = value.trim();
+  if (!text) {
+    return null;
+  }
+  const bracket = /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(text);
+  if (bracket) {
+    const address = bracket[1] ?? "";
+    if (!isHostAddress(address)) {
+      return null;
+    }
+    if (!bracket[2]) {
+      return { address, port: null };
+    }
+    const port = Number(bracket[2]);
+    return isPort(port) ? { address, port } : null;
+  }
+  const colon = text.lastIndexOf(":");
+  if (colon > 0 && text.indexOf(":") === colon) {
+    const address = text.slice(0, colon);
+    const portText = text.slice(colon + 1);
+    if (/^\d{1,5}$/.test(portText) && isHostAddress(address)) {
+      const port = Number(portText);
+      return isPort(port) ? { address, port } : null;
+    }
+  }
+  if (!isHostAddress(text)) {
+    return null;
+  }
+  return { address: text, port: null };
+}
+
+export function endpointForSave(
+  typed: string,
+  draft: { octets: readonly number[]; portDigits: readonly number[] },
+): { address: string; port: number } | null {
+  const fallback = portFromDigits(draft.portDigits);
+  const text = typed.trim();
+  if (text) {
+    const parsed = parseTypedEndpoint(text);
+    if (!parsed) {
+      return null;
+    }
+    const port = parsed.port ?? fallback;
+    return isPort(port) ? { address: parsed.address, port } : null;
+  }
+  const address = formatOctets(draft.octets);
+  if (!isHostAddress(address) || !isPort(fallback)) {
+    return null;
+  }
+  return { address, port: fallback };
+}
+
 export function randomPin(randomInt: (bound: number) => number): Pin {
   const raw = randomInt(10000);
   const next = Number.isInteger(raw) && raw >= 0 && raw < 10000 ? raw : 0;

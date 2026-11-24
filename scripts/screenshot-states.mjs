@@ -98,6 +98,9 @@ const framed = [
   "pair-rejected",
   "pair-it",
   "forget-confirm",
+  "rename",
+  "remove-all",
+  "wake-play",
   "help",
   "help-it",
 ];

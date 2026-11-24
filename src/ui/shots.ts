@@ -236,6 +236,29 @@ export function shellForShot(name: string): Shell | null {
     });
     return reduceShell(shell, { kind: "ask-forget", address: "192.168.1.30" });
   }
+  if (name === "rename") {
+    let shell = reduceShell(initialShell(), {
+      kind: "hosts",
+      hosts: [host("192.168.1.20", "192.168.1.20", true, "02:00:00:00:00:0A")],
+    });
+    return reduceShell(shell, { kind: "edit-host", id: "192.168.1.20", field: "name" });
+  }
+  if (name === "remove-all") {
+    let shell = reduceShell(initialShell(), {
+      kind: "hosts",
+      hosts: [host("Den", "192.168.1.30", false)],
+    });
+    return reduceShell(shell, { kind: "ask-remove-all" });
+  }
+  if (name === "wake-play") {
+    let shell = reduceShell(initialShell(), {
+      kind: "hosts",
+      hosts: [host("Living room", "192.168.1.20", true, "02:00:00:00:00:0A")],
+    });
+    shell = reduceShell(shell, { kind: "select-host", address: "192.168.1.20" });
+    shell = reduceShell(shell, { kind: "remember-last", appId: "celeste" });
+    return reduceShell(shell, { kind: "open-hosts" });
+  }
   if (name === "help" || name === "help-it") {
     let shell = reduceShell(initialShell(), { kind: "open-help" });
     if (name === "help-it") {
