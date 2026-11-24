@@ -1,5 +1,12 @@
 import type { MediaPeer } from "./client.ts";
 
+/** Ordered and reliable, which is the only `input` channel the host keeps. */
+export function openInputChannel(peer: {
+  createDataChannel(label: string, init: RTCDataChannelInit): RTCDataChannel;
+}): RTCDataChannel {
+  return peer.createDataChannel("input", { ordered: true });
+}
+
 function shortenVideoBuffer(receiver: RTCRtpReceiver): void {
   if ("jitterBufferTarget" in receiver && typeof receiver.jitterBufferTarget !== "function") {
     receiver.jitterBufferTarget = 0;
@@ -13,6 +20,7 @@ export class BrowserPeer implements MediaPeer {
   private pc: RTCPeerConnection | null = null;
   private control: RTCDataChannel | null = null;
   private gamepad: RTCDataChannel | null = null;
+  private input: RTCDataChannel | null = null;
   private onControl: ((text: string) => void) | null = null;
   private onCandidate: ((candidate: string, mid: string) => void) | null = null;
   private media = new MediaStream();
@@ -56,7 +64,7 @@ export class BrowserPeer implements MediaPeer {
       }
     };
     await pc.setRemoteDescription({ type: "offer", sdp });
-    pc.createDataChannel("input", { ordered: true });
+    this.input = openInputChannel(pc);
   }
 
   async createAnswer(): Promise<string> {
@@ -79,6 +87,7 @@ export class BrowserPeer implements MediaPeer {
   close(): void {
     this.control = null;
     this.gamepad = null;
+    this.input = null;
     this.pc?.close();
     this.pc = null;
     this.video.srcObject = null;
@@ -94,6 +103,15 @@ export class BrowserPeer implements MediaPeer {
     if (this.control?.readyState === "open") {
       this.control.send(text);
     }
+  }
+
+  /** Text frame on the client-opened `input` channel. False when it is not open. */
+  sendInput(text: string): boolean {
+    if (this.input?.readyState !== "open") {
+      return false;
+    }
+    this.input.send(text);
+    return true;
   }
 
   setControlHandler(handler: ((text: string) => void) | null): void {
