@@ -10,12 +10,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "build": "node scripts/build-wgt.mjs"
+    "build": "node scripts/build-wgt.mjs",
+    "screenshot": "node scripts/build-ui.mjs && node scripts/screenshot-library.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/ws": "^8.5.13",
     "esbuild": "^0.24.2",
+    "puppeteer-core": "^23.11.1",
     "typescript": "^5.7.2",
     "ws": "^8.18.0"
   }

@@ -6,3 +6,4 @@ dist/
 staging/
 build/
 *.wgt
+tizen/preview.js
