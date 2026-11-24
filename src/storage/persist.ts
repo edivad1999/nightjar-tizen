@@ -72,12 +72,23 @@ function settings(value: unknown): StreamSettings {
   });
 }
 
+function persistedBody(raw: unknown): unknown {
+  if (!isRecord(raw) || Array.isArray(raw.hosts)) {
+    return raw;
+  }
+  if (isRecord(raw.state)) {
+    return raw.state;
+  }
+  return raw;
+}
+
 export function parsePersisted(raw: unknown): Persisted {
-  if (!isRecord(raw) || !Array.isArray(raw.hosts)) {
+  const body = persistedBody(raw);
+  if (!isRecord(body) || !Array.isArray(body.hosts)) {
     return { hosts: [], settings: DEFAULT_SETTINGS };
   }
   const hosts: SavedHost[] = [];
-  for (const item of raw.hosts) {
+  for (const item of body.hosts) {
     const parsed = host(item);
     if (parsed) {
       hosts.push(parsed);
@@ -85,7 +96,7 @@ export function parsePersisted(raw: unknown): Persisted {
   }
   return {
     hosts: hosts.reduce<SavedHost[]>((list, item) => upsertHosts(list, [item]), []),
-    settings: settings(raw.settings),
+    settings: settings(body.settings),
   };
 }
 
@@ -93,31 +104,100 @@ export function serializePersisted(value: Persisted): string {
   return JSON.stringify(value);
 }
 
+function samePc(left: SavedHost, right: SavedHost): boolean {
+  if (left.macAddress && right.macAddress && left.macAddress === right.macAddress) {
+    return true;
+  }
+  return left.address === right.address;
+}
+
+function foldHost(incoming: SavedHost, matches: readonly SavedHost[]): SavedHost {
+  return matches.reduce<SavedHost>((acc, item) => ({
+    name: acc.name || item.name,
+    address: acc.address,
+    port: acc.port,
+    macAddress: acc.macAddress ?? item.macAddress,
+    credentials: acc.credentials ?? item.credentials,
+  }), incoming);
+}
+
 export function upsertHosts(hosts: SavedHost[], incoming: SavedHost[]): SavedHost[] {
-  const next = hosts.map((item) => ({ ...item }));
+  let next = hosts.map((item) => ({ ...item }));
   for (const host of incoming) {
-    const byMac = host.macAddress
-      ? next.findIndex((item) => item.macAddress === host.macAddress)
-      : -1;
-    const byAddress = next.findIndex((item) => item.address === host.address);
-    const index = byMac >= 0 ? byMac : byAddress;
-    if (index < 0) {
-      next.push(host);
+    const matches = next.filter((item) => samePc(item, host));
+    if (matches.length === 0) {
+      next.push({ ...host });
       continue;
     }
-    const current = next[index];
-    if (!current) {
-      continue;
+    const merged = foldHost({ ...host }, matches);
+    let placed = false;
+    const rebuilt: SavedHost[] = [];
+    for (const item of next) {
+      if (!matches.includes(item)) {
+        rebuilt.push(item);
+        continue;
+      }
+      if (!placed) {
+        rebuilt.push(merged);
+        placed = true;
+      }
     }
-    next[index] = {
-      name: host.name || current.name,
-      address: host.address,
-      port: host.port,
-      macAddress: host.macAddress ?? current.macAddress,
-      credentials: host.credentials ?? current.credentials,
-    };
+    next = rebuilt;
   }
   return next;
+}
+
+export function credentialsForDiscovery(hosts: readonly SavedHost[], macAddress: string | null): Credentials | null {
+  if (!macAddress) {
+    return null;
+  }
+  return hosts.find((host) => host.macAddress === macAddress)?.credentials ?? null;
+}
+
+export function writeHostCredentials(
+  hosts: readonly SavedHost[],
+  activeAddress: string | null,
+  macAddress: string | null,
+  credentials: Credentials | null,
+): SavedHost[] {
+  const byAddress = activeAddress === null ? -1 : hosts.findIndex((host) => host.address === activeAddress);
+  const byMac = byAddress < 0 && macAddress
+    ? hosts.findIndex((host) => host.macAddress === macAddress)
+    : -1;
+  const index = byAddress >= 0 ? byAddress : byMac;
+  if (index < 0) {
+    return hosts.map((host) => ({ ...host }));
+  }
+  return hosts.map((host, item) => (item === index ? { ...host, credentials } : { ...host }));
+}
+
+export function loadPersisted(raw: string | null): { persisted: Persisted; loadedCleanly: boolean } {
+  if (raw === null || raw === "") {
+    return { persisted: { hosts: [], settings: DEFAULT_SETTINGS }, loadedCleanly: true };
+  }
+  try {
+    const persisted = parsePersisted(JSON.parse(raw));
+    const droppedSecret = raw.includes("clientSecret") && !persisted.hosts.some((host) => host.credentials);
+    return { persisted, loadedCleanly: !droppedSecret };
+  } catch {
+    return { persisted: { hosts: [], settings: DEFAULT_SETTINGS }, loadedCleanly: false };
+  }
+}
+
+export function shouldWriteHosts(previousRaw: string | null, nextHosts: readonly SavedHost[], loadedCleanly: boolean): boolean {
+  if (loadedCleanly || nextHosts.some((host) => host.credentials)) {
+    return true;
+  }
+  return !previousRaw || !previousRaw.includes("clientSecret");
+}
+
+export function writeStorageItem(storage: { setItem(key: string, value: string): void }, key: string, value: string): boolean {
+  try {
+    storage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function updateHost(hosts: SavedHost[], address: string, patch: Partial<SavedHost>): SavedHost[] {
