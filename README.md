@@ -83,7 +83,7 @@ This repository does not deploy to a TV.
 1. In Rubylight, turn on the WebRTC server. Signalling is `ws://<pc>:8000`. Discovery is UDP port 8000.
 2. On the TV, add the PC address or search the network.
 3. Read the PIN on the TV and enter it in the Rubylight console.
-4. Open a game. Back opens the stream menu.
+4. Open a game. Remote Back opens the stream menu.
 
 ## Licence
 

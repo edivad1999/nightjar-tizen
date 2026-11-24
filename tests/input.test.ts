@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { BrowserPeer, openInputChannel } from "../src/net/browser-peer.ts";
 import { InputSession, Wheel, encodeInputMessage, pointerMessages, textMessages } from "../src/protocol/input.ts";
-import { applyStreamKey, keyAction } from "../src/ui/keys.ts";
+import { applyStreamKey, keyAction, leavesForTv, streamKeyDecision } from "../src/ui/keys.ts";
+import { text } from "../src/ui/strings.ts";
 import { initialShell, reduceShell, type Shell } from "../src/ui/model.ts";
 
 test("a key down and a mouse move are sent as input JSON on the channel the peer opened", async () => {
@@ -65,6 +66,14 @@ test("remote Back opens the stream menu and is not a key", () => {
   assert.equal(shell.focusId, "menu-resume");
   assert.equal(applyStreamKey({ capturing: false, event: back, send: (message) => session.send(message) }), "pass");
   assert.equal(keyAction("", 10009), "back");
+  assert.equal(streamKeyDecision({ ...back, type: "keydown" }, true).kind, "menu");
+  assert.equal(streamKeyDecision({ ...back, type: "keydown" }, true, true).kind, "pass");
+  assert.equal(leavesForTv(back, false), false);
+  assert.equal(leavesForTv(back, true), true);
+  assert.equal(leavesForTv({ code: "Exit", key: "Exit", keyCode: 10182 }, false), true);
+  assert.equal(leavesForTv({ code: "XF86Back", key: "XF86Back", keyCode: 10009 }, true), true);
+  assert.equal(text("en", "backOpensMenu"), "Remote Back opens the menu");
+  assert.equal(text("it", "backOpensMenu"), "Indietro del telecomando apre il menu");
   shell = reduceShell(shell, { kind: "back" });
   assert.equal(shell.menuOpen, false);
 });
@@ -80,7 +89,14 @@ test("Exit, Menu and colour keys map to host codes, and a keyboard Alt stays Alt
     capturing: true,
     event: { type: "keydown", code: "Exit", key: "Exit", keyCode: 10182 },
     send,
-  }), "sent");
+  }), "pass");
+  assert.equal(applyStreamKey({
+    capturing: true,
+    event: { type: "keydown", code: "XF86Exit", key: "XF86Exit", keyCode: 0 },
+    send,
+  }), "pass");
+  assert.equal(keyAction("Exit", 10182), null);
+  assert.equal(keyAction("XF86Exit", 0), null);
   assert.equal(applyStreamKey({
     capturing: true,
     event: { type: "keydown", code: "", key: "Menu", keyCode: 18 },
@@ -102,7 +118,6 @@ test("Exit, Menu and colour keys map to host codes, and a keyboard Alt stays Alt
     send,
   }), "sent");
   assert.deepEqual(sent, [
-    '{"v":1,"type":"key","code":"Escape","down":true}',
     '{"v":1,"type":"key","code":"ContextMenu","down":true}',
     '{"v":1,"type":"key","code":"AltLeft","down":true}',
     '{"v":1,"type":"key","code":"F13","down":true}',

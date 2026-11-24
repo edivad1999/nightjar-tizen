@@ -42,7 +42,8 @@ test("the shell opens the stream menu on back and returns to the PC list", () =>
 test("remote keys and focus move across a row", () => {
   assert.equal(keyAction("ArrowLeft", 0), "left");
   assert.equal(keyAction("", 10009), "back");
-  assert.equal(keyAction("", 10182), "exit");
+  assert.equal(keyAction("", 10182), null);
+  assert.equal(keyAction("Exit", 0), null);
   const next = moveFocus([
     { id: "a", row: 0, col: 0 },
     { id: "b", row: 0, col: 1 },

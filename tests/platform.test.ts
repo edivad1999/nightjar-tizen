@@ -48,6 +48,13 @@ function filesystem(files: Map<string, string>): TvFilesystem {
   };
 }
 
+test("the TV keeps long-press Back, so Exit and Back stay unregistered", () => {
+  assert.equal(TV_KEYS.includes("Exit"), false);
+  assert.equal(TV_KEYS.includes("Back"), false);
+  assert.equal(TV_KEYS.includes("XF86Back"), false);
+  assert.equal(TV_KEYS.includes("Return"), false);
+});
+
 test("a throwing registerKeyBatch does not escape", () => {
   assert.equal(registerTvKeys({
     tvinputdevice: {

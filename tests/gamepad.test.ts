@@ -32,7 +32,6 @@ function pad(spec: {
 function playing(now: number, controls: ControlPrefs = DEFAULT_CONTROLS, bufferedAmount = 0): PadEnv {
   return {
     now,
-    live: true,
     streaming: true,
     onStream: true,
     tabs: false,
@@ -46,7 +45,6 @@ function playing(now: number, controls: ControlPrefs = DEFAULT_CONTROLS, buffere
 function menu(now: number): PadEnv {
   return {
     now,
-    live: false,
     streaming: true,
     onStream: true,
     tabs: false,
@@ -72,7 +70,7 @@ function run(state: PadsState, snapshots: PadSnapshot[], env: PadEnv) {
   return { effects, gamepad: messages(effects, "gamepad"), control: messages(effects, "control") };
 }
 
-test("start is bit 7 and opens the stream menu; right stick click does not", () => {
+test("start is bit 7, and a stream sends it to the game", () => {
   assert.equal(Button.START, 1 << 7);
   const start = readPad(pad({ pressed: [9] }));
   const stick = readPad(pad({ pressed: [11] }));
@@ -81,42 +79,37 @@ test("start is bit 7 and opens the stream menu; right stick click does not", () 
   assert.equal(stick.buttons === (1 << 7), false);
 
   const state = createPads();
-  const stickEffects = stepPads(state, [pad({ pressed: [11] })], menu(0));
-  assert.equal(stickEffects.some((effect) => effect.kind === "menu"), false);
-  const startEffects = stepPads(state, [pad({ pressed: [9] })], menu(16));
-  assert.equal(startEffects.some((effect) => effect.kind === "menu"), true);
-});
-
-test("the menu combo while live opens the menu and releases every button", () => {
-  const state = createPads();
-  const { effects, gamepad } = run(state, [pad({ pressed: [4, 5, 8, 9] })], playing(0));
-  assert.equal(effects.some((effect) => effect.kind === "menu"), true);
-  assert.equal(gamepad.length, 1);
-  assert.equal(gamepad[0]?.buttons, 0);
-  assert.equal(gamepad[0]?.leftTrigger, 0);
-  assert.equal(gamepad[0]?.rightTrigger, 0);
-  assert.equal(gamepad[0]?.leftStickX, 0);
-  assert.equal(gamepad[0]?.leftStickY, 0);
-});
-
-test("Back, LB, RB and X toggle the performance overlay and leave Start out of it", () => {
-  const state = createPads();
-  const { effects, gamepad } = run(state, [pad({ pressed: [2, 4, 5, 8] })], playing(0));
-  assert.equal(effects.some((effect) => effect.kind === "overlay"), true);
+  const { effects, gamepad } = run(state, [pad({ pressed: [9] })], playing(0));
   assert.equal(effects.some((effect) => effect.kind === "menu"), false);
-  assert.equal(gamepad[0]?.buttons, Button.X | Button.LB | Button.RB | Button.BACK);
+  assert.equal(gamepad[0]?.buttons, Button.START);
 });
 
-test("holding Back for one second opens the menu and a shorter hold does not", () => {
+test("a live stream forwards menu and overlay chords and does not open the app", () => {
+  const menuChord = run(createPads(), [pad({ pressed: [4, 5, 8, 9] })], playing(0));
+  assert.equal(menuChord.effects.some((effect) => effect.kind === "menu"), false);
+  assert.equal(menuChord.gamepad[0]?.buttons, Button.BACK | Button.START | Button.LB | Button.RB);
+
+  const overlay = run(createPads(), [pad({ pressed: [2, 4, 5, 8] })], playing(0));
+  assert.equal(overlay.effects.some((effect) => effect.kind === "overlay"), false);
+  assert.equal(overlay.effects.some((effect) => effect.kind === "menu"), false);
+  assert.equal(overlay.gamepad[0]?.buttons, Button.X | Button.LB | Button.RB | Button.BACK);
+});
+
+test("holding Back during a stream stays a game button", () => {
   const state = createPads();
   const first = run(state, [pad({ pressed: [8] })], playing(0));
   assert.equal(first.effects.some((effect) => effect.kind === "menu"), false);
   assert.equal(first.gamepad[0]?.buttons, Button.BACK);
-  const early = run(state, [pad({ pressed: [8] })], playing(999));
-  assert.equal(early.effects.some((effect) => effect.kind === "menu"), false);
   const held = run(state, [pad({ pressed: [8] })], playing(1000));
-  assert.equal(held.effects.some((effect) => effect.kind === "menu"), true);
-  assert.equal(held.gamepad.at(-1)?.buttons, 0);
+  assert.equal(held.effects.some((effect) => effect.kind === "menu"), false);
+  assert.equal(held.gamepad.at(-1)?.buttons, Button.BACK);
+});
+
+test("an open stream menu does not take the gamepad", () => {
+  const { effects, gamepad } = run(createPads(), [pad({ pressed: [0, 1, 9], axes: [0, -1, 0, 0] })], menu(0));
+  const ui = effects.filter((effect) => effect.kind !== "control" && effect.kind !== "gamepad");
+  assert.deepEqual(ui, []);
+  assert.equal(gamepad[0]?.buttons, Button.A | Button.B | Button.START);
 });
 
 test("B goes back in a menu and stays a game button while the stream is live", () => {

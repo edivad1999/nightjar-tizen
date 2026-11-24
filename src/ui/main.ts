@@ -42,7 +42,7 @@ import { magicPacket, stepWakePlay, type WakePlay } from "../protocol/wol.ts";
 import { openArtworkCache, type CachedApp } from "../storage/artwork-cache.ts";
 import { credentialsForDiscovery, bindStorage, loadPersisted, migrateLibraryKeys, readStored, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, wakesAutomatically, writeHostCredentials, writeStored, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
-import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
+import { applyStreamKey, keyAction, leavesForTv, type KeySample } from "./keys.ts";
 import { createLaunchTrace } from "./launch-debug.ts";
 import { activateFocused, addressDraft, cacheIds, disconnectCommand, initialShell, isLibraryControl, lastAppForHost, preferredCacheId, reduceShell, type LaunchChoice, type LibrarySort, type PairNotice, type SessionCommand, type Shell, type StartFailure, type TextSize } from "./model.ts";
 import { healthOverlayVisible } from "./overlay.ts";
@@ -1140,6 +1140,10 @@ function keySample(event: KeyboardEvent, type: "keydown" | "keyup"): KeySample {
 }
 
 document.addEventListener("keydown", (event) => {
+  const sample = keySample(event, "keydown");
+  if (leavesForTv(sample, event.repeat)) {
+    return;
+  }
   if (shell.playbackBlocked && shell.screen === "stream" && keyAction(event.code, event.keyCode) === "activate") {
     event.preventDefault();
     peer.primePlayback();
@@ -1147,7 +1151,8 @@ document.addEventListener("keydown", (event) => {
   }
   const outcome = applyStreamKey({
     capturing: streamCapturing(),
-    event: keySample(event, "keydown"),
+    event: sample,
+    repeat: event.repeat,
     send: (message) => {
       streamInput.send(message);
     },
@@ -1176,10 +1181,6 @@ document.addEventListener("keydown", (event) => {
   event.preventDefault();
   if (action === "back") {
     apply({ kind: "back" });
-    return;
-  }
-  if (action === "exit") {
-    apply({ kind: "exit" });
     return;
   }
   if (action === "activate") {
@@ -1452,10 +1453,8 @@ window.setInterval(() => {
   const phase = shell.link.phase;
   const stream = phase.kind === "online" ? phase.snapshot.stream : null;
   const streaming = stream !== null && stream.kind !== "none";
-  const live = shell.screen === "stream" && !shell.menuOpen && stream?.kind === "live";
   const effects = stepPads(pads, readGamepads(), {
     now: performance.now(),
-    live,
     streaming,
     onStream: shell.screen === "stream",
     tabs: shell.screen === "library" || shell.screen === "game" || shell.screen === "settings",
@@ -1624,6 +1623,9 @@ function onTvVisible(): void {
 }
 
 function onExitKey(event: KeyboardEvent): void {
+  if (leavesForTv(keySample(event, "keydown"), event.repeat)) {
+    return;
+  }
   const prompt = exitPrompt(shell.locale);
   const step = exitStep(shell.screen, exitArmed, keyAction(event.code, event.keyCode) === "back");
   exitArmed = step.armed;

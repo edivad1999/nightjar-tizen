@@ -1,6 +1,6 @@
 import { keyMessage, type InputMessage } from "../protocol/input.ts";
 
-export type NavAction = "up" | "down" | "left" | "right" | "activate" | "back" | "exit";
+export type NavAction = "up" | "down" | "left" | "right" | "activate" | "back";
 
 export function keyAction(code: string, keyCode: number): NavAction | null {
   if (code === "ArrowUp" || keyCode === 38) {
@@ -21,10 +21,23 @@ export function keyAction(code: string, keyCode: number): NavAction | null {
   if (code === "Escape" || code === "Backspace" || keyCode === 10009 || keyCode === 461) {
     return "back";
   }
-  if (keyCode === 10182 || code === "Exit") {
-    return "exit";
-  }
   return null;
+}
+
+function isPlatformExit(event: { code: string; key: string; keyCode: number }): boolean {
+  return event.keyCode === 10182
+    || event.code === "Exit"
+    || event.key === "Exit"
+    || event.code === "XF86Exit"
+    || event.key === "XF86Exit";
+}
+
+function backHold(event: { code: string; key: string; keyCode: number }, repeat: boolean): boolean {
+  return repeat && isStreamMenuBack(event);
+}
+
+export function leavesForTv(event: { code: string; key: string; keyCode: number }, repeat: boolean): boolean {
+  return isPlatformExit(event) || backHold(event, repeat);
 }
 
 export type KeySample = {
@@ -52,8 +65,6 @@ export function isStreamMenuBack(event: { code: string; key: string; keyCode: nu
 
 // The host drops codes it cannot map. Colour keys become F13 to F16.
 const TV_NAMES: Record<string, string> = {
-  Exit: "Escape",
-  XF86Exit: "Escape",
   Menu: "ContextMenu",
   ColorF0Red: "F13",
   ColorF1Green: "F14",
@@ -79,7 +90,6 @@ const KEY_CODES: Record<number, string> = {
   404: "F14",
   405: "F15",
   406: "F16",
-  10182: "Escape",
 };
 
 function hostKeyCode(event: KeySample): string | null {
@@ -100,8 +110,8 @@ function hostKeyCode(event: KeySample): string | null {
   return KEY_CODES[event.keyCode] ?? null;
 }
 
-export function streamKeyDecision(event: KeySample, capturing: boolean): StreamKeyDecision {
-  if (!capturing) {
+export function streamKeyDecision(event: KeySample, capturing: boolean, repeat = false): StreamKeyDecision {
+  if (leavesForTv(event, repeat) || !capturing) {
     return { kind: "pass" };
   }
   if (isStreamMenuBack(event)) {
@@ -117,9 +127,10 @@ export function streamKeyDecision(event: KeySample, capturing: boolean): StreamK
 export function applyStreamKey(args: {
   capturing: boolean;
   event: KeySample;
+  repeat?: boolean;
   send: (message: InputMessage) => void;
 }): "menu" | "sent" | "pass" {
-  const decision = streamKeyDecision(args.event, args.capturing);
+  const decision = streamKeyDecision(args.event, args.capturing, args.repeat ?? false);
   if (decision.kind === "menu") {
     return "menu";
   }
