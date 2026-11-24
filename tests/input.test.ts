@@ -334,6 +334,22 @@ test("keys route to the UI while a menu or another screen is open", () => {
   }).kind, "ui");
 });
 
+test("keyboard routing does not claim long-press Back or Exit", () => {
+  const back = key("", "XF86Back", 10009);
+  const exit = key("Exit", "Exit", 10182);
+  assert.equal(leavesForTv(back, true), true);
+  assert.equal(leavesForTv(exit, false), true);
+  assert.equal(leavesForTv(exit, true), true);
+  for (const event of [back, exit, key("XF86Exit", "XF86Exit", 10182)]) {
+    assert.equal(routeStreamKey({
+      uiOpen: false,
+      enabled: true,
+      keyboardActive: true,
+      event,
+    }).kind, "ui");
+  }
+});
+
 test("the remote still owns Back, Menu, Exit, and colour keys", () => {
   const cases = [
     key("", "ArrowLeft", 37),

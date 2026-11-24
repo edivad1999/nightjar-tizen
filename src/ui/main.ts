@@ -1152,12 +1152,16 @@ function streamUiOpen(): boolean {
 }
 
 function takeStreamKey(event: KeyboardEvent, type: "keydown" | "keyup"): "ui" | "done" {
+  const sample = keySample(event, type);
+  if (leavesForTv(sample, event.repeat)) {
+    return "ui";
+  }
   const now = Date.now();
   const route = routeStreamKey({
     uiOpen: streamUiOpen(),
     enabled: controlPrefs().localInput,
     keyboardActive: keyboardIsActive(keyboardLatch, now),
-    event: keySample(event, type),
+    event: sample,
   });
   if (route.arm) {
     keyboardLatch = armKeyboard(now);
@@ -1236,12 +1240,17 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("keyup", (event) => {
+  const sample = keySample(event, "keyup");
+  if (leavesForTv(sample, event.repeat)) {
+    return;
+  }
   if (takeStreamKey(event, "keyup") === "done") {
     return;
   }
   const outcome = applyStreamKey({
     capturing: streamCapturing(),
-    event: keySample(event, "keyup"),
+    event: sample,
+    repeat: event.repeat,
     send: (message) => {
       streamInput.send(message);
     },
