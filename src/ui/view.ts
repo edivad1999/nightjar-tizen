@@ -13,6 +13,96 @@ import {
 } from "../domain/settings.ts";
 import type { FocusItem } from "./focus.ts";
 import type { Shell } from "./model.ts";
+import { applyStreamView, type OverlayNodes } from "./overlay.ts";
+
+export const MENU_STATS_ID = "menu-stats";
+export const MENU_LOGS_ID = "menu-logs";
+
+let performanceShown = false;
+let logsOn = false;
+let overlayRoot: HTMLElement | null = null;
+let hudFpsNode: HTMLElement | null = null;
+let hudLatencyNode: HTMLElement | null = null;
+
+export function setStreamMenuHealth(performance: boolean, logs: boolean): void {
+  performanceShown = performance;
+  logsOn = logs;
+}
+
+export function setStreamOverlayVisible(visible: boolean): void {
+  if (overlayRoot) {
+    overlayRoot.hidden = !visible;
+  }
+  if (!visible) {
+    if (hudFpsNode) {
+      hudFpsNode.hidden = true;
+    }
+    if (hudLatencyNode) {
+      hudLatencyNode.hidden = true;
+    }
+  }
+}
+
+function fact(label: string): HTMLElement {
+  const row = el("div", "");
+  row.append(el("dt", "", label), el("dd", ""));
+  return row;
+}
+
+export function mountStreamOverlay(host: ParentNode): OverlayNodes {
+  const facts = el("aside", "stream-overlay");
+  facts.hidden = true;
+  overlayRoot = facts;
+  const title = el("h2", "", "Stream");
+  const list = el("dl", "stream-facts");
+  const rows = ["Latency", "Packet loss", "Resolution", "FPS", "Codec", "Bitrate", "HDR", "Gamepad", "Connection", "Interpolation", "Recovery"].map(fact);
+  list.append(...rows);
+  facts.append(title, list);
+  const value = (index: number) => rows[index]?.querySelector("dd") ?? el("dd", "");
+  const hudFps = el("div", "performance-hud performance-hud-left");
+  hudFps.hidden = true;
+  hudFpsNode = hudFps;
+  const fpsValue = el("strong", "");
+  const fpsUnit = el("span", "", "FPS");
+  const fpsTarget = el("small", "");
+  hudFps.append(fpsValue, fpsUnit, fpsTarget);
+  const hudLatency = el("dl", "performance-hud performance-hud-right");
+  hudLatency.hidden = true;
+  hudLatencyNode = hudLatency;
+  const cells = ["Latency", "Average", "Network", "Jitter buffer", "Decode", "To screen", "Packet loss", "Dropped"].map(fact);
+  hudLatency.append(...cells);
+  host.append(facts, hudFps, hudLatency);
+  const cell = (index: number) => cells[index]?.querySelector("dd") ?? el("dd", "");
+  return {
+    app: title,
+    latency: value(0),
+    packetLoss: value(1),
+    resolution: value(2),
+    fps: value(3),
+    codec: value(4),
+    bitrate: value(5),
+    hdr: value(6),
+    gamepad: value(7),
+    connection: value(8),
+    interpolation: value(9),
+    recovery: value(10),
+    performanceButton: el("span", ""),
+    performanceFps: fpsValue,
+    performanceFpsTarget: fpsTarget,
+    performanceTotal: cell(0),
+    performanceAverage: cell(1),
+    performanceNetwork: cell(2),
+    performanceJitter: cell(3),
+    performanceDecode: cell(4),
+    performanceToScreen: cell(5),
+    performancePacketLoss: cell(6),
+    performanceDropped: cell(7),
+    fpsPanel: hudFps,
+    latencyPanel: hudLatency,
+  };
+}
+
+export { applyStreamView };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -217,12 +307,16 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       const menu = el("section", "stream-menu");
       menu.append(el("h2", "title", "Stream"));
       const resume = button("menu-resume", "Resume", "button primary");
+      const stats = button(MENU_STATS_ID, performanceShown ? "Hide performance overlay" : "Show performance overlay");
+      const logs = button(MENU_LOGS_ID, logsOn ? "Stop sending logs" : "Send logs to PC");
       const disconnect = button("menu-disconnect", "Disconnect");
       const quit = button("menu-quit", "Quit game");
       field(items, resume.id, 0, 0);
-      field(items, disconnect.id, 1, 0);
-      field(items, quit.id, 2, 0);
-      menu.append(resume, disconnect, quit);
+      field(items, stats.id, 1, 0);
+      field(items, logs.id, 2, 0);
+      field(items, disconnect.id, 3, 0);
+      field(items, quit.id, 4, 0);
+      menu.append(resume, stats, logs, disconnect, quit);
       menu.append(el("p", "muted", "Disconnect leaves the game running. Quit game stops it on the PC."));
       if (phase.kind === "online" && phase.snapshot.mouseMode) {
         menu.append(el("p", "muted", "Controller mouse is on."));

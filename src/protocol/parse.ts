@@ -457,3 +457,59 @@ export function candidateMessage(sessionId: number, candidate: string, mid: stri
 export function keyframeMessage(reason: "not-decoding" | "not-presenting" | "reattached"): string {
   return JSON.stringify({ v: 1, type: "request-keyframe", reason });
 }
+
+export const MAX_CLIENT_LOG_LINES = 100;
+export const MAX_CLIENT_LOG_LINE_LENGTH = 4000;
+
+export type ClientLogMessage = {
+  version: 2;
+  type: "client-log";
+  lines: string[];
+};
+
+const textEncoder = new TextEncoder();
+
+function isControl(code: number): boolean {
+  return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+}
+
+export function sanitizeLogLine(line: string): string {
+  let cleaned = "";
+  for (const char of line) {
+    const code = char.codePointAt(0);
+    cleaned += code !== undefined && isControl(code) ? " " : char;
+  }
+  if (textEncoder.encode(cleaned).length <= MAX_CLIENT_LOG_LINE_LENGTH) {
+    return cleaned;
+  }
+  let used = 0;
+  let cut = "";
+  for (const char of cleaned) {
+    const next = textEncoder.encode(char).length;
+    if (used + next > MAX_CLIENT_LOG_LINE_LENGTH) {
+      break;
+    }
+    cut += char;
+    used += next;
+  }
+  return cut;
+}
+
+export function clientLogMessage(lines: readonly string[]): ClientLogMessage {
+  if (lines.length > MAX_CLIENT_LOG_LINES) {
+    throw new Error("client-log accepts at most 100 lines");
+  }
+  return {
+    version: PROTOCOL_VERSION,
+    type: "client-log",
+    lines: lines.map(sanitizeLogLine),
+  };
+}
+
+export function isUnsupportedClientLog(message: unknown): boolean {
+  if (!isRecord(message) || message.code !== "unsupported-message") {
+    return false;
+  }
+  const detail = typeof message.message === "string" ? message.message : "";
+  return detail.includes("client-log");
+}
