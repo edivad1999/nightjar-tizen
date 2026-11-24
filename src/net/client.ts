@@ -1,3 +1,4 @@
+import { pairingFromStored } from "../domain/pairing.ts";
 import type { AudioChannels } from "../domain/settings.ts";
 import { prepareLocalAnswer, prepareRemoteOffer } from "../protocol/sdp.ts";
 import { initialLink, step, type Effect, type Intent, type LinkState, type StepContext } from "../protocol/machine.ts";
@@ -36,6 +37,7 @@ export class SignallingClient {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private stayUrl: string | null = null;
   private stayCredentials: Credentials | null = null;
+  private userPinOffer = false;
 
   constructor(
     peer: MediaPeer,
@@ -60,12 +62,16 @@ export class SignallingClient {
     this.resetMedia();
     this.stayUrl = url;
     this.stayCredentials = credentials;
+    this.userPinOffer = pairingFromStored(credentials).kind !== "paired";
     this.openSocket(url, credentials);
   }
 
   send(text: string): boolean {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    if (this.state.pairing.kind === "paired" && this.state.phase.kind !== "online") {
       return false;
     }
     socket.send(text);
@@ -113,7 +119,7 @@ export class SignallingClient {
   }
 
   private openSocket(url: string, credentials: Credentials | null): void {
-    this.state = initialLink(credentials);
+    this.state = { ...initialLink(credentials), offerPin: this.userPinOffer };
     const socket = this.connectSocket(url);
     this.socket = socket;
     socket.onopen = () => {
@@ -167,6 +173,7 @@ export class SignallingClient {
       if (this.stayUrl !== url) {
         return;
       }
+      this.userPinOffer = false;
       this.detachSocket();
       this.resetMedia();
       this.openSocket(url, this.stayCredentials);
@@ -190,8 +197,20 @@ export class SignallingClient {
   private dispatch(intent: Intent): void {
     const result = step(this.state, intent, this.context);
     this.state = result.state;
-    this.hooks.onState(this.state);
     for (const effect of result.effects) {
+      if (effect.kind === "store-credentials" || effect.kind === "drop-credentials") {
+        this.run(effect);
+      }
+    }
+    try {
+      this.hooks.onState(this.state);
+    } catch {
+      // A storage or screen failure must not skip authenticate, pairing, or media.
+    }
+    for (const effect of result.effects) {
+      if (effect.kind === "store-credentials" || effect.kind === "drop-credentials") {
+        continue;
+      }
       this.run(effect);
     }
   }

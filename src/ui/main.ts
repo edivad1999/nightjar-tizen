@@ -1,4 +1,5 @@
 import { randomPin, signallingUrl } from "../domain/ids.ts";
+import { shouldAutoPair } from "../domain/pairing.ts";
 import { frameRateMaximum, probeTv, readVideoReceiverCapabilities, tvReceivesAv1 } from "../domain/probe.ts";
 import {
   BITRATES_KBPS,
@@ -26,7 +27,7 @@ import { connectedMessage, disconnectedMessage, padsEqual, parseHostControl, rea
 import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
 import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.ts";
-import { parsePersisted, serializePersisted, updateHost, upsertHosts, type SavedHost } from "../storage/persist.ts";
+import { credentialsForDiscovery, loadPersisted, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, writeHostCredentials, writeStorageItem, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { activateFocused, addressDraft, addressIssue, initialShell, isLibraryControl, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
@@ -95,16 +96,16 @@ function loadLibrary(shell: Shell): Shell {
   }
 }
 
+let hostsWritable = true;
+
 function loadShell(): Shell {
   const shell = loadLibrary(initialShell());
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return shell;
-    }
-    const parsed = parsePersisted(JSON.parse(raw));
-    return { ...shell, hosts: parsed.hosts, settings: parsed.settings };
+    const loaded = loadPersisted(localStorage.getItem(STORAGE_KEY));
+    hostsWritable = loaded.loadedCleanly;
+    return { ...shell, hosts: loaded.persisted.hosts, settings: loaded.persisted.settings };
   } catch {
+    hostsWritable = false;
     return shell;
   }
 }
@@ -179,12 +180,25 @@ const health = createStreamHealth();
 const overlayNodes = mountStreamOverlay(document.body);
 
 function persist(): void {
-  localStorage.setItem(STORAGE_KEY, serializePersisted({ hosts: shell.hosts, settings: shell.settings }));
-  localStorage.setItem(LIBRARY_KEY, JSON.stringify({
-    locale: shell.locale,
-    lastAppByAddress: shell.lastAppByAddress,
-    quitOnDisconnect: shell.quitOnDisconnect,
-  }));
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (shouldWriteHosts(raw, shell.hosts, hostsWritable)) {
+      const wrote = writeStorageItem(localStorage, STORAGE_KEY, serializePersisted({
+        hosts: shell.hosts,
+        settings: shell.settings,
+      }));
+      if (wrote) {
+        hostsWritable = true;
+      }
+    }
+    writeStorageItem(localStorage, LIBRARY_KEY, JSON.stringify({
+      locale: shell.locale,
+      lastAppByAddress: shell.lastAppByAddress,
+      quitOnDisconnect: shell.quitOnDisconnect,
+    }));
+  } catch {
+    return;
+  }
 }
 
 function streamCapturing(): boolean {
@@ -241,7 +255,7 @@ function noticeFor(code: string, message: string): PairNotice | null {
   if (code === "client-disabled") {
     return { kind: "rejected", message };
   }
-  if (code === "pairing-cancelled" || code === "authentication-failed" || code === "not-authenticated") {
+  if (code === "pairing-cancelled" || code === "authentication-failed") {
     return { kind: "failed", message };
   }
   return null;
@@ -256,7 +270,12 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
     const notice = pairNotice;
     pairNotice = null;
     apply({ kind: "link", link, notice });
-    if (link.phase.kind === "need-pair" && (previous === "wait-auth" || previous === "authenticating")) {
+    if (shouldAutoPair({
+      previousPhase: previous,
+      phase: link.phase.kind,
+      offerPin: link.offerPin,
+      pairing: link.pairing,
+    })) {
       queueMicrotask(() => {
         client.intent({ kind: "pair", pin: randomPin((bound) => Math.floor(Math.random() * bound)) });
       });
@@ -289,9 +308,11 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
     }
   },
   onCredentials: (credentials) => {
-    if (shell.activeAddress) {
-      rememberHost(shell.activeAddress, { credentials });
-    }
+    shell = {
+      ...shell,
+      hosts: writeHostCredentials(shell.hosts, shell.activeAddress, shell.link.macAddress, credentials),
+    };
+    persist();
   },
   onMac: (macAddress) => {
     if (shell.activeAddress) {
@@ -572,7 +593,7 @@ async function search(): Promise<void> {
     address: item.address,
     port: item.port,
     macAddress: item.macAddress,
-    credentials: shell.hosts.find((saved) => saved.macAddress === item.macAddress)?.credentials ?? null,
+    credentials: credentialsForDiscovery(shell.hosts, item.macAddress),
   })));
   apply({ kind: "hosts", hosts });
   if (shell.screen === "discover") {

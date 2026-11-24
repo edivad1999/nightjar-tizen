@@ -1,5 +1,6 @@
-import { isCredentialPair, authenticationProof } from "./auth.ts";
-import { isPin, type Pin } from "../domain/ids.ts";
+import { authenticationProof } from "./auth.ts";
+import type { Pin } from "../domain/ids.ts";
+import { pairingFromStored, reducePairing, type Pairing } from "../domain/pairing.ts";
 import { fitAudio, STEREO_EXTENSIONS, type AudioChannels, type HostExtensions, type StreamSettings, type VideoMode } from "../domain/settings.ts";
 import {
   answerMessage,
@@ -48,6 +49,8 @@ export type Phase =
 
 export type LinkState = {
   credentials: Credentials | null;
+  pairing: Pairing;
+  offerPin: boolean;
   nonce: string | null;
   macAddress: string | null;
   pendingModes: VideoMode[] | null;
@@ -90,13 +93,24 @@ export type StepResult = {
 };
 
 export function initialLink(credentials: Credentials | null): LinkState {
+  const pairing = pairingFromStored(credentials);
   return {
-    credentials,
+    credentials: pairing.kind === "paired" ? pairing.credentials : null,
+    pairing,
+    offerPin: false,
     nonce: null,
     macAddress: null,
     pendingModes: null,
     pendingExtensions: null,
     phase: { kind: "idle" },
+  };
+}
+
+function project(state: LinkState, pairing: Pairing): LinkState {
+  return {
+    ...state,
+    pairing,
+    credentials: pairing.kind === "paired" ? pairing.credentials : null,
   };
 }
 
@@ -175,11 +189,15 @@ function dataUrl(mime: string | null, data: string | null): string | null {
 }
 
 function beginPair(state: LinkState, pinText: string): StepResult {
-  if (!isPin(pinText)) {
+  const pairing = reducePairing(state.pairing, { type: "begin-pin", pin: pinText });
+  if (pairing.kind !== "pairing") {
+    if (state.pairing.kind === "paired") {
+      return same(state);
+    }
     return withPhase(state, { kind: "fault", code: "invalid-pin", message: "The PIN must be four digits" });
   }
-  return withPhase(state, { kind: "pairing", pin: pinText }, [
-    { kind: "send", text: requestPairingMessage(pinText, "") },
+  return withPhase(project(state, pairing), { kind: "pairing", pin: pairing.pin }, [
+    { kind: "send", text: requestPairingMessage(pairing.pin, "") },
   ]);
 }
 
@@ -209,19 +227,27 @@ function applySession(snapshot: HostSnapshot, stateName: string, sessionId: numb
   };
 }
 
+function presentedCredentials(state: LinkState): boolean {
+  return state.phase.kind === "authenticating" || state.phase.kind === "online";
+}
+
 function onError(state: LinkState, message: Extract<ServerMessage, { kind: "error" }>, context: StepContext): StepResult {
   if (message.code === "authentication-failed") {
-    const next: LinkState = { ...state, credentials: null };
-    if (state.nonce) {
-      return withPhase(next, { kind: "need-pair" }, [{ kind: "drop-credentials" }]);
+    if (!presentedCredentials(state)) {
+      return { state: project(state, reducePairing(state.pairing, { type: "before-auth" })), effects: [] };
     }
-    return withPhase(next, { kind: "fault", code: message.code, message: message.message }, [{ kind: "drop-credentials" }]);
+    const pairing = reducePairing(state.pairing, { type: "auth-failed" });
+    if (pairing.kind !== "failed") {
+      return { state: project(state, pairing), effects: [] };
+    }
+    return withPhase(project(state, pairing), { kind: "need-pair" }, [{ kind: "drop-credentials" }]);
   }
   if (message.code === "client-disabled") {
     return withPhase(state, { kind: "disabled", message: message.message });
   }
   if (message.code === "pairing-cancelled") {
-    return withPhase(state, { kind: "need-pair" });
+    const pairing = reducePairing(state.pairing, { type: "pin-cancelled" });
+    return withPhase(project(state, pairing), { kind: "need-pair" });
   }
   if (message.code === "incorrect-pin" || message.code === "pairing-expired" || message.code === "pairing-failed") {
     const retry = beginPair(state, context.nextPin());
@@ -234,7 +260,7 @@ function onError(state: LinkState, message: Extract<ServerMessage, { kind: "erro
     return retry;
   }
   if (message.code === "not-authenticated") {
-    return withPhase({ ...state, credentials: null }, { kind: "need-pair" }, [{ kind: "drop-credentials" }]);
+    return { state: project(state, reducePairing(state.pairing, { type: "not-authenticated" })), effects: [] };
   }
   const snapshot = online(state);
   if (snapshot) {
@@ -247,7 +273,7 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
   switch (message.kind) {
     case "auth-required": {
       const effects: Effect[] = [];
-      let next = rememberMac({ ...state, nonce: message.nonce }, message.macAddress, effects);
+      const next = rememberMac({ ...state, nonce: message.nonce }, message.macAddress, effects);
       if (message.pairing !== "client-pin") {
         return withPhase(next, {
           kind: "fault",
@@ -255,26 +281,32 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
           message: "This host does not use a PIN shown on the TV",
         }, effects);
       }
-      const credentials = next.credentials;
-      const proof = credentials ? authenticationProof(credentials.clientSecret, message.nonce) : null;
-      if (credentials && proof && isCredentialPair(credentials.clientId, credentials.clientSecret)) {
-        effects.push({ kind: "send", text: authenticateMessage(credentials.clientId, proof) });
+      const stored = next.pairing.kind === "paired" ? next.pairing.credentials : null;
+      const proof = stored ? authenticationProof(stored.clientSecret, message.nonce) : null;
+      if (stored && proof) {
+        effects.push({ kind: "send", text: authenticateMessage(stored.clientId, proof) });
         return withPhase(next, { kind: "authenticating" }, effects);
       }
-      if (credentials) {
-        next = { ...next, credentials: null };
-        effects.push({ kind: "drop-credentials" });
+      if (next.pairing.kind === "paired") {
+        return withPhase(next, {
+          kind: "fault",
+          code: "invalid-challenge",
+          message: "The PC sent a sign-in challenge this TV could not answer",
+        }, effects);
       }
       return withPhase(next, { kind: "need-pair" }, effects);
     }
     case "authenticated":
       return same(state);
     case "paired": {
-      const credentials = {
-        clientId: message.clientId.toLowerCase(),
-        clientSecret: message.clientSecret.toLowerCase(),
-      };
-      if (!isCredentialPair(credentials.clientId, credentials.clientSecret)) {
+      if (state.pairing.kind !== "pairing") {
+        return same(state);
+      }
+      const pairing = reducePairing(state.pairing, {
+        type: "pin-accepted",
+        credentials: { clientId: message.clientId, clientSecret: message.clientSecret },
+      });
+      if (pairing.kind !== "paired") {
         return withPhase(state, {
           kind: "fault",
           code: "invalid-message",
@@ -282,8 +314,8 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
         });
       }
       return {
-        state: { ...state, credentials },
-        effects: [{ kind: "store-credentials", credentials }],
+        state: project(state, pairing),
+        effects: [{ kind: "store-credentials", credentials: pairing.credentials }],
       };
     }
     case "gateway-status": {
@@ -400,7 +432,9 @@ export function step(state: LinkState, intent: Intent, context: StepContext): St
     case "connected":
       return withPhase(state, { kind: "wait-auth" }, [{ kind: "close-media" }]);
     case "closed":
-      return withPhase(state, { kind: "idle" }, [{ kind: "close-media" }]);
+      return withPhase(project(state, reducePairing(state.pairing, { type: "transport" })), { kind: "idle" }, [
+        { kind: "close-media" },
+      ]);
     case "server":
       return onServer(state, intent.message, context);
     case "pair": {
