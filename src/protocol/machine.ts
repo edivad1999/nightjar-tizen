@@ -1,6 +1,6 @@
 import { isCredentialPair, authenticationProof } from "./auth.ts";
 import { isPin, type Pin } from "../domain/ids.ts";
-import type { StreamSettings, VideoMode } from "../domain/settings.ts";
+import { fitAudio, STEREO_EXTENSIONS, type AudioChannels, type HostExtensions, type StreamSettings, type VideoMode } from "../domain/settings.ts";
 import {
   answerMessage,
   authenticateMessage,
@@ -27,6 +27,8 @@ export type HostSnapshot = {
   sessionActive: boolean;
   runningAppId: string | null;
   modes: VideoMode[];
+  extensions: HostExtensions;
+  audioChannels: AudioChannels;
   apps: AppEntry[];
   artwork: Record<string, string>;
   stream: StreamPhase;
@@ -49,6 +51,7 @@ export type LinkState = {
   nonce: string | null;
   macAddress: string | null;
   pendingModes: VideoMode[] | null;
+  pendingExtensions: HostExtensions | null;
   phase: Phase;
 };
 
@@ -57,7 +60,7 @@ export type Effect =
   | { kind: "store-credentials"; credentials: Credentials }
   | { kind: "drop-credentials" }
   | { kind: "store-mac"; macAddress: string }
-  | { kind: "apply-offer"; sessionId: number; sdp: string }
+  | { kind: "apply-offer"; sessionId: number; sdp: string; channels: AudioChannels }
   | { kind: "apply-candidate"; sessionId: number; candidate: string; mid: string }
   | { kind: "close-media" };
 
@@ -92,6 +95,7 @@ export function initialLink(credentials: Credentials | null): LinkState {
     nonce: null,
     macAddress: null,
     pendingModes: null,
+    pendingExtensions: null,
     phase: { kind: "idle" },
   };
 }
@@ -110,6 +114,8 @@ function emptySnapshot(hostName: string, modes: VideoMode[]): HostSnapshot {
     sessionActive: false,
     runningAppId: null,
     modes,
+    extensions: STEREO_EXTENSIONS,
+    audioChannels: 2,
     apps: [],
     artwork: {},
     stream: { kind: "none" },
@@ -285,18 +291,22 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
       let next = rememberMac(state, message.macAddress, effects);
       const modes = next.pendingModes ?? [];
       const snapshot = emptySnapshot(message.gatewayName, modes);
+      snapshot.extensions = next.pendingExtensions ?? STEREO_EXTENSIONS;
       snapshot.sessionActive = message.sessionActive;
       snapshot.runningAppId = message.runningAppId;
-      next = { ...next, pendingModes: null };
+      next = { ...next, pendingModes: null, pendingExtensions: null };
       effects.push({ kind: "send", text: getAppsMessage() });
       return withPhase(next, { kind: "online", snapshot }, effects);
     }
     case "capabilities": {
       const snapshot = online(state);
       if (!snapshot) {
-        return { state: { ...state, pendingModes: message.modes }, effects: [] };
+        return {
+          state: { ...state, pendingModes: message.modes, pendingExtensions: message.extensions },
+          effects: [],
+        };
       }
-      return replaceSnapshot(state, { ...snapshot, modes: message.modes });
+      return replaceSnapshot(state, { ...snapshot, modes: message.modes, extensions: message.extensions });
     }
     case "apps": {
       const snapshot = online(state);
@@ -361,7 +371,7 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
         ? snapshot.stream
         : { kind: "starting" as const, appId: snapshot.stream.appId, state: snapshot.stream.state, sessionId: message.sessionId };
       return replaceSnapshot(state, { ...snapshot, stream }, [
-        { kind: "apply-offer", sessionId: message.sessionId, sdp: message.sdp },
+        { kind: "apply-offer", sessionId: message.sessionId, sdp: message.sdp, channels: snapshot.audioChannels },
       ]);
     }
     case "candidate": {
@@ -424,11 +434,14 @@ export function step(state: LinkState, intent: Intent, context: StepContext): St
       if (!snapshot) {
         return same(state);
       }
+      const channels = fitAudio(intent.video.audioChannels, snapshot.extensions);
+      const video = videoFields(intent.video);
       const text = intent.kind === "play"
-        ? startSessionMessage(intent.appId, videoFields(intent.video))
-        : switchSessionMessage(intent.appId, videoFields(intent.video));
+        ? startSessionMessage(intent.appId, video, channels)
+        : switchSessionMessage(intent.appId, video, channels);
       return replaceSnapshot(state, {
         ...snapshot,
+        audioChannels: channels,
         banner: null,
         stream: { kind: "starting", appId: intent.appId, state: "starting", sessionId: null },
       }, [{ kind: "close-media" }, { kind: "send", text }]);

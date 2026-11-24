@@ -1,4 +1,16 @@
-import { isCodec, isFrameRate, type Codec, type FrameRate, type VideoMode } from "../domain/settings.ts";
+import {
+  isAudioChannels,
+  isCodec,
+  isFrameRate,
+  STEREO_EXTENSIONS,
+  type AudioChannels,
+  type Codec,
+  type CodecFrameRate,
+  type FrameRate,
+  type HostExtensions,
+  type InputExtension,
+  type VideoMode,
+} from "../domain/settings.ts";
 
 export const PROTOCOL_VERSION = 2;
 export const DISCOVER_DATAGRAM = '{"version":2,"type":"discover"}';
@@ -29,7 +41,7 @@ export type ServerMessage =
       runningAppId: string | null;
       macAddress: string | null;
     }
-  | { kind: "capabilities"; modes: VideoMode[] }
+  | { kind: "capabilities"; modes: VideoMode[]; extensions: HostExtensions }
   | { kind: "apps"; apps: AppEntry[] }
   | { kind: "app-artwork"; appId: string; available: boolean; mimeType: string | null; data: string | null }
   | { kind: "session-status"; state: string; sessionId: number | null; message: string | null }
@@ -103,6 +115,63 @@ function frameRates(value: unknown): FrameRate[] {
     }
   }
   return rates;
+}
+
+function audioChannelList(value: unknown): AudioChannels[] {
+  if (!Array.isArray(value)) {
+    return [2];
+  }
+  const list: AudioChannels[] = [];
+  for (const item of value) {
+    if (typeof item === "number" && isAudioChannels(item) && !list.includes(item)) {
+      list.push(item);
+    }
+  }
+  return list.length > 0 ? list : [2];
+}
+
+function inputExtension(value: unknown): InputExtension | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const label = text(value.label);
+  const version = positiveInt(value.version);
+  if (!label || version === null || typeof value.keyboard !== "boolean" || typeof value.mouse !== "boolean") {
+    return null;
+  }
+  return { label, version, keyboard: value.keyboard, mouse: value.mouse };
+}
+
+function codecFrameRateList(value: unknown): CodecFrameRate[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const list: CodecFrameRate[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const width = positiveInt(item.width);
+    const height = positiveInt(item.height);
+    const codec = text(item.codec);
+    const rates = frameRates(item.frameRates);
+    if (!width || !height || !codec || !isCodec(codec) || rates.length === 0) {
+      continue;
+    }
+    list.push({ width, height, codec, frameRates: rates });
+  }
+  return list;
+}
+
+function hostExtensions(value: unknown): HostExtensions {
+  if (!isRecord(value)) {
+    return STEREO_EXTENSIONS;
+  }
+  return {
+    audioChannels: audioChannelList(value.audioChannels),
+    input: inputExtension(value.input),
+    codecFrameRates: codecFrameRateList(value.codecFrameRates),
+  };
 }
 
 function videoModes(value: unknown): VideoMode[] {
@@ -228,7 +297,10 @@ export function parseServerMessage(payload: string): ParseResult {
       };
     }
     case "capabilities":
-      return { ok: true, message: { kind: "capabilities", modes: videoModes(value.videoModes) } };
+      return {
+        ok: true,
+        message: { kind: "capabilities", modes: videoModes(value.videoModes), extensions: hostExtensions(value.extensions) },
+      };
     case "apps": {
       const list = apps(value.apps);
       if (!list) {
@@ -351,8 +423,8 @@ export function startSessionMessage(appId: string, video: {
   codec: string;
   bitrateKbps: number;
   hdr: boolean;
-}): string {
-  return envelope("start-session", { appId, video, audio: { channels: 2 } });
+}, channels: AudioChannels = 2): string {
+  return envelope("start-session", { appId, video, audio: { channels } });
 }
 
 export function switchSessionMessage(appId: string, video: {
@@ -362,8 +434,8 @@ export function switchSessionMessage(appId: string, video: {
   codec: string;
   bitrateKbps: number;
   hdr: boolean;
-}): string {
-  return envelope("switch-session", { appId, video, audio: { channels: 2 } });
+}, channels: AudioChannels = 2): string {
+  return envelope("switch-session", { appId, video, audio: { channels } });
 }
 
 export function stopSessionMessage(): string {

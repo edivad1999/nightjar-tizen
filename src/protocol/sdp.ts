@@ -1,5 +1,13 @@
+import type { AudioChannels } from "../domain/settings.ts";
+
 export const COLOUR_SPACE_URI = "http://www.webrtc.org/experiments/rtp-hdrext/color-space";
 const VIDEO_PT = "96";
+
+// libwebrtc's 5.1 and 7.1 layouts. Rubylight docs/webrtc.md.
+const SURROUND_FMTP: Record<6 | 8, string> = {
+  6: "channel_mapping=0,4,1,2,3,5;num_streams=4;coupled_streams=2;minptime=10;useinbandfec=1",
+  8: "channel_mapping=0,6,1,2,3,4,5,7;num_streams=5;coupled_streams=3;minptime=10;useinbandfec=1",
+};
 
 function newline(sdp: string): string {
   return sdp.includes("\r\n") ? "\r\n" : "\n";
@@ -77,6 +85,42 @@ export function prepareRemoteOffer(sdp: string): string {
   return stripColourSpaceExtension(separateAudioSync(sdp));
 }
 
-export function prepareLocalAnswer(offer: string, answer: string): string {
-  return stripColourSpaceExtension(preserveVideoFmtp(offer, answer));
+export function rewriteSurroundAnswer(sdp: string, channels: 6 | 8): string {
+  const nl = newline(sdp);
+  const lines = sdp.split(nl);
+  const multi = new RegExp(`^a=rtpmap:(\\d+)\\s+multiopus/48000/${channels}(?:\\s|$)`, "i");
+  const opus = /^a=rtpmap:(\d+)\s+opus\/48000\/2(?:\s|$)/i;
+  let payload: string | null = null;
+  let rtpmapIndex = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const found = multi.exec(line) ?? opus.exec(line);
+    const next = found?.[1];
+    if (next) {
+      payload = next;
+      rtpmapIndex = index;
+      break;
+    }
+  }
+  if (!payload || rtpmapIndex < 0) {
+    throw new Error(`The answer has no opus line to carry ${channels}-channel surround`);
+  }
+  lines[rtpmapIndex] = `a=rtpmap:${payload} multiopus/48000/${channels}`;
+  const fmtpPrefix = `a=fmtp:${payload} `;
+  const fmtp = `${fmtpPrefix}${SURROUND_FMTP[channels]}`;
+  const fmtpIndex = lines.findIndex((line) => line.toLowerCase().startsWith(fmtpPrefix.toLowerCase()));
+  if (fmtpIndex >= 0) {
+    lines[fmtpIndex] = fmtp;
+  } else {
+    lines.splice(rtpmapIndex + 1, 0, fmtp);
+  }
+  return lines.join(nl);
+}
+
+export function prepareLocalAnswer(offer: string, answer: string, channels: AudioChannels = 2): string {
+  const prepared = stripColourSpaceExtension(preserveVideoFmtp(offer, answer));
+  if (channels === 6 || channels === 8) {
+    return rewriteSurroundAnswer(prepared, channels);
+  }
+  return prepared;
 }

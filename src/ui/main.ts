@@ -1,5 +1,21 @@
 import { isHostAddress, randomPin, signallingUrl } from "../domain/ids.ts";
-import { BITRATES_KBPS, CODECS, FRAME_RATES, RESOLUTIONS, hdrAllowed, settingsRejection } from "../domain/settings.ts";
+import { frameRateMaximum, probeTv, readVideoReceiverCapabilities, tvReceivesAv1 } from "../domain/probe.ts";
+import {
+  BITRATES_KBPS,
+  CODECS,
+  RESOLUTIONS,
+  applySettings,
+  codecsFor,
+  fitAudio,
+  frameRatesFor,
+  hdrAllowed,
+  lockFrameRate,
+  selectableAudio,
+  settingsRejection,
+  type Codec,
+  type FrameRate,
+  type StreamSettings,
+} from "../domain/settings.ts";
 import { BrowserPeer } from "../net/browser-peer.ts";
 import { SignallingClient, type MediaPeer } from "../net/client.ts";
 import { connectedMessage, disconnectedMessage, padsEqual, parseHostControl, readPad, stateMessage, type PadAxes, type PadReading } from "../protocol/gamepad.ts";
@@ -45,6 +61,43 @@ function cycle<T>(items: readonly T[], current: T, pick: (item: T) => boolean): 
   return items[(index + 1) % items.length] ?? current;
 }
 
+function onlineSnapshot() {
+  return shell.link.phase.kind === "online" ? shell.link.phase.snapshot : null;
+}
+
+function offeredCodecs(): readonly Codec[] {
+  const snapshot = onlineSnapshot();
+  const mode = snapshot?.modes.find((item) => item.width === shell.settings.width && item.height === shell.settings.height) ?? null;
+  const receivesAv1 = tvReceivesAv1(readVideoReceiverCapabilities());
+  const fallback = CODECS.filter((codec) => receivesAv1 || codec !== "av1");
+  if (!mode) {
+    return fallback;
+  }
+  const codecs = codecsFor(mode, snapshot?.extensions ?? null, receivesAv1);
+  return codecs.length > 0 ? codecs : fallback;
+}
+
+function offeredRates(): readonly FrameRate[] {
+  const snapshot = onlineSnapshot();
+  const mode = snapshot?.modes.find((item) => item.width === shell.settings.width && item.height === shell.settings.height) ?? null;
+  const hostRates = frameRatesFor(mode, shell.settings.codec, snapshot?.extensions ?? null);
+  return lockFrameRate(hostRates, mode ? frameRateMaximum(mode, shell.settings.codec) : null);
+}
+
+function fittedPlaySettings(): StreamSettings {
+  const codecs = offeredCodecs();
+  const rates = offeredRates();
+  const codec = codecs.includes(shell.settings.codec)
+    ? shell.settings.codec
+    : (codecs.find((item) => item === "hevc") ?? codecs[0] ?? shell.settings.codec);
+  const fps = rates.includes(shell.settings.fps) ? shell.settings.fps : (rates[rates.length - 1] ?? shell.settings.fps);
+  return applySettings(shell.settings, {
+    codec,
+    fps,
+    audioChannels: fitAudio(shell.settings.audioChannels, onlineSnapshot()?.extensions ?? null),
+  });
+}
+
 const appNode = document.querySelector("#app");
 const videoNode = document.querySelector("#stream");
 if (!(appNode instanceof HTMLElement) || !(videoNode instanceof HTMLVideoElement)) {
@@ -59,6 +112,7 @@ const peer = new BrowserPeer(streamVideo);
 const pads = new Map<number, { sequence: number; last: PadAxes; announced: boolean; lastSent: number }>();
 const artRequested = new Set<string>();
 let wakeToken = 0;
+let probedModes = "";
 let stallSince = performance.now();
 let lastTime = 0;
 let keyframeSent = false;
@@ -100,6 +154,18 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
     }
     if (link.phase.kind === "online") {
       const snapshot = link.phase.snapshot;
+      const modeKey = JSON.stringify(snapshot.modes);
+      if (snapshot.modes.length > 0 && modeKey !== probedModes) {
+        probedModes = modeKey;
+        void probeTv(snapshot.modes, navigator.mediaCapabilities).then(() => {
+          const fitted = fittedPlaySettings();
+          if (fitted.fps !== shell.settings.fps || fitted.codec !== shell.settings.codec) {
+            apply({ kind: "settings", patch: { fps: fitted.fps, codec: fitted.codec } });
+          } else {
+            paint();
+          }
+        });
+      }
       const missing = snapshot.apps.filter((app) => !snapshot.artwork[app.id] && !artRequested.has(app.id));
       if (missing.length > 0) {
         for (const app of missing) {
@@ -167,7 +233,8 @@ function play(appId: string): void {
   if (phase.kind !== "online") {
     return;
   }
-  const rejection = settingsRejection(shell.settings, phase.snapshot.modes);
+  const video = fittedPlaySettings();
+  const rejection = settingsRejection(video, phase.snapshot.modes, phase.snapshot.extensions);
   if (rejection) {
     apply({ kind: "banner", text: rejection });
     return;
@@ -179,10 +246,10 @@ function play(appId: string): void {
       return;
     }
     apply({ kind: "cancel-confirm" });
-    client.intent({ kind: "switch-app", appId, video: shell.settings });
+    client.intent({ kind: "switch-app", appId, video });
     return;
   }
-  client.intent({ kind: "play", appId, video: shell.settings });
+  client.intent({ kind: "play", appId, video });
 }
 
 function activate(id: string): void {
@@ -221,7 +288,8 @@ function activate(id: string): void {
     return;
   }
   if (id === "setting-fps") {
-    const next = cycle(FRAME_RATES, shell.settings.fps, (item) => item === shell.settings.fps);
+    const rates = offeredRates();
+    const next = cycle(rates, shell.settings.fps, (item) => item === shell.settings.fps);
     apply({ kind: "settings", patch: { fps: next } });
     return;
   }
@@ -231,7 +299,8 @@ function activate(id: string): void {
     return;
   }
   if (id === "setting-codec") {
-    const next = cycle(CODECS, shell.settings.codec, (item) => item === shell.settings.codec);
+    const codecs = offeredCodecs();
+    const next = cycle(codecs, shell.settings.codec, (item) => item === shell.settings.codec);
     apply({ kind: "settings", patch: { codec: next } });
     return;
   }
@@ -239,6 +308,14 @@ function activate(id: string): void {
     if (hdrAllowed(shell.settings)) {
       apply({ kind: "settings", patch: { hdr: !shell.settings.hdr } });
     }
+    return;
+  }
+  if (id === "setting-audio") {
+    const extensions = onlineSnapshot()?.extensions ?? null;
+    const choices = selectableAudio(extensions);
+    const current = fitAudio(shell.settings.audioChannels, extensions);
+    const next = cycle(choices, current, (item) => item === current);
+    apply({ kind: "settings", patch: { audioChannels: next } });
     return;
   }
   if (id === "menu-resume") {

@@ -1,3 +1,5 @@
+import type { AudioChannels } from "../domain/settings.ts";
+import { prepareLocalAnswer } from "../protocol/sdp.ts";
 import type { MediaPeer } from "./client.ts";
 
 function shortenVideoBuffer(receiver: RTCRtpReceiver): void {
@@ -16,6 +18,7 @@ export class BrowserPeer implements MediaPeer {
   private onControl: ((text: string) => void) | null = null;
   private onCandidate: ((candidate: string, mid: string) => void) | null = null;
   private media = new MediaStream();
+  private offerSdp = "";
   private readonly video: HTMLVideoElement;
 
   constructor(video: HTMLVideoElement) {
@@ -24,6 +27,7 @@ export class BrowserPeer implements MediaPeer {
 
   async acceptOffer(sdp: string): Promise<void> {
     this.close();
+    this.offerSdp = sdp;
     const pc = new RTCPeerConnection({ iceServers: [] });
     this.pc = pc;
     this.media = new MediaStream();
@@ -59,14 +63,17 @@ export class BrowserPeer implements MediaPeer {
     pc.createDataChannel("input", { ordered: true });
   }
 
-  async createAnswer(): Promise<string> {
+  async createAnswer(channels: AudioChannels = 2): Promise<string> {
     const pc = this.pc;
     if (!pc) {
       throw new Error("The TV has no peer connection");
     }
     const answer = await pc.createAnswer();
+    if (channels === 6 || channels === 8) {
+      answer.sdp = prepareLocalAnswer(this.offerSdp, answer.sdp ?? "", channels);
+    }
     await pc.setLocalDescription(answer);
-    return pc.localDescription?.sdp ?? "";
+    return pc.localDescription?.sdp ?? answer.sdp ?? "";
   }
 
   async addCandidate(candidate: string, mid: string): Promise<void> {

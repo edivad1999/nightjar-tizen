@@ -68,6 +68,7 @@ function settings(value: unknown): StreamSettings {
     codec,
     bitrateKbps: typeof value.bitrateKbps === "number" ? value.bitrateKbps : DEFAULT_SETTINGS.bitrateKbps,
     hdr: value.hdr === true,
+    audioChannels: value.audioChannels === 6 || value.audioChannels === 8 ? value.audioChannels : 2,
   });
 }
 
