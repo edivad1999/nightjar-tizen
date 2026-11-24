@@ -125,7 +125,7 @@ test("hdr is refused for h264 and 720p", () => {
 });
 
 test("addresses and pins", () => {
-  assert.equal(isHostAddress("192.168.1.168"), true);
+  assert.equal(isHostAddress("192.168.1.50"), true);
   assert.equal(isHostAddress("192.168.001.1"), false);
   assert.equal(isPin("0421"), true);
   const pin = randomPin(() => 421);

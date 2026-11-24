@@ -48,7 +48,7 @@ A push to `main` publishes an unsigned `nightjar.wgt` on [Releases](../../releas
 tizen package -t wgt -s <certificate-profile> -- nightjar.wgt
 ```
 
-4. On the TV, open Settings, Support, About Smart TV and press `1 2 3 4 5`. Turn Developer Mode on. Set Host PC IP to this PC, `192.168.1.168` on the set used here. Restart the TV.
+4. On the TV, open Settings, Support, About Smart TV and press `1 2 3 4 5`. Turn Developer Mode on. Set Host PC IP to the LAN address of the PC you sign and install from, for example `192.168.1.50`. Restart the TV.
 5. Install it. `sdb` is in `~/tizen-studio/tools/`.
 
 ```sh
@@ -66,9 +66,9 @@ The Release workflow can also be started with `workflow_dispatch`. See [`.github
 
 ## Sideload
 
-Target used here: a Samsung S90D on Tizen 9. Developer Mode on the TV must list your PC as `192.168.1.168`.
+Developed against a Samsung S90D on Tizen 9. Developer Mode on the TV must list your PC's LAN address, for example `192.168.1.50`.
 
-1. Install Tizen Studio and the TV extension. Enable Developer Mode on the TV and set the host PC IP to `192.168.1.168`.
+1. Install Tizen Studio and the TV extension. Enable Developer Mode on the TV and set the host PC IP to your PC's LAN address.
 2. Connect, then install the signed widget:
 
 ```sh

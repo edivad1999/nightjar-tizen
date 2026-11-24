@@ -55,7 +55,7 @@ test("a host address may be an IPv6 literal", () => {
   assert.equal(isHostAddress("::ffff:192.0.2.1"), true);
   assert.equal(isHostAddress("1:2:3:4:5:6:7:8"), true);
   assert.equal(isHostAddress("2001:db8::192.0.2.1"), true);
-  assert.equal(isHostAddress("192.168.1.168"), true);
+  assert.equal(isHostAddress("192.168.1.50"), true);
   assert.equal(isHostAddress("den.local"), true);
   assert.equal(isHostAddress("192.168.001.1"), false);
   assert.equal(isHostAddress("gggg::1"), false);
