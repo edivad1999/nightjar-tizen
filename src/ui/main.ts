@@ -36,17 +36,18 @@ import {
   type PadSnapshot,
 } from "../input/pads.ts";
 import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
-import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, keyframeMessage } from "../protocol/parse.ts";
+import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.ts";
 import { credentialsForDiscovery, loadPersisted, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, writeHostCredentials, writeStorageItem, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
+import { createLaunchTrace } from "./launch-debug.ts";
 import { activateFocused, addressDraft, addressIssue, initialShell, isLibraryControl, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
 import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import type { Locale } from "./strings.ts";
 import { CONTROLS_KEY, controlPrefs, installControlPrefs, loadControlPrefs, storedControlPrefs, toggleControl } from "./controls-settings.ts";
-import { applyStreamView, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
+import { applyLaunchPanel, applyStreamView, mountLaunchPanel, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
 
 const STORAGE_KEY = "nightjar.tizen.v1";
 const LIBRARY_KEY = "nightjar.tizen.library";
@@ -101,6 +102,7 @@ function loadLibrary(shell: Shell): Shell {
     return {
       ...shell,
       locale,
+      launchDebug: record.launchDebug === false ? false : true,
       lastAppByAddress: stringMap(record.lastAppByAddress) ?? shell.lastAppByAddress,
       quitOnDisconnect: booleanMap(record.quitOnDisconnect) ?? shell.quitOnDisconnect,
     };
@@ -194,6 +196,43 @@ let streamingHealth = false;
 let readingStream = false;
 const health = createStreamHealth();
 const overlayNodes = mountStreamOverlay(document.body);
+const launchTrace = createLaunchTrace();
+const launchPanel = mountLaunchPanel(document.body);
+const pendingLaunchLogs: string[] = [];
+
+function launchPanelShown(): boolean {
+  return shell.launchDebug && shell.screen === "stream";
+}
+
+function noteLaunch(step: string, detail = ""): void {
+  launchTrace.note(step, detail);
+  applyLaunchPanel(launchPanel, launchTrace.text().join("\n"), launchPanelShown());
+  const line = launchTrace.text().at(-1);
+  if (line) {
+    pendingLaunchLogs.push(line);
+  }
+  flushLaunchLogs();
+}
+
+function flushLaunchLogs(): void {
+  if (!shell.launchDebug || shell.link.phase.kind !== "online" || pendingLaunchLogs.length === 0) {
+    return;
+  }
+  const lines = pendingLaunchLogs.splice(0, 100);
+  if (!client.sendAuthenticated(JSON.stringify(clientLogMessage(lines)))) {
+    pendingLaunchLogs.unshift(...lines);
+  }
+}
+
+peer.setPlaybackHandler((state, detail) => {
+  noteLaunch("playback", detail ? `${state} ${detail}` : state);
+  const blocked = state !== "playing";
+  if (blocked === shell.playbackBlocked) {
+    return;
+  }
+  shell = { ...shell, playbackBlocked: blocked };
+  paint();
+});
 
 function persist(): void {
   try {
@@ -209,6 +248,7 @@ function persist(): void {
     }
     writeStorageItem(localStorage, LIBRARY_KEY, JSON.stringify({
       locale: shell.locale,
+      launchDebug: shell.launchDebug,
       lastAppByAddress: shell.lastAppByAddress,
       quitOnDisconnect: shell.quitOnDisconnect,
     }));
@@ -242,6 +282,7 @@ function paint(): void {
   capturingInput = capture;
   setStreamMenuHealth(health.performanceShown(), health.logsEnabled());
   focusItems = render(appRoot, shell);
+  applyLaunchPanel(launchPanel, launchTrace.text().join("\n"), launchPanelShown());
   const focus = focusItems.find((item) => item.id === shell.focusId) ?? focusItems[0];
   if (focus) {
     document.getElementById(focus.id)?.focus();
@@ -260,6 +301,8 @@ function rememberHost(address: string, patch: Partial<SavedHost>): void {
 }
 
 let pairNotice: PairNotice | null = null;
+let lastStreamLabel = "";
+let lastStartErrorLabel = "";
 
 function noticeFor(code: string, message: string): PairNotice | null {
   if (code === "pairing-expired") {
@@ -283,9 +326,29 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
 }, {
   onState: (link) => {
     const previous = shell.link.phase.kind;
+    if (link.phase.kind === "online") {
+      const stream = link.phase.snapshot.stream;
+      const label = stream.kind === "none" ? "none" : `${stream.kind} ${stream.state}`;
+      if (label !== lastStreamLabel) {
+        lastStreamLabel = label;
+        noteLaunch("stream", label);
+      }
+      const error = link.phase.snapshot.lastStartError;
+      const errorLabel = error ? `${error.code} ${error.message}` : "";
+      if (errorLabel && errorLabel !== lastStartErrorLabel) {
+        lastStartErrorLabel = errorLabel;
+        noteLaunch("start-error", errorLabel);
+      }
+    } else if (link.phase.kind !== previous) {
+      noteLaunch("phase", link.phase.kind);
+    }
+    if (shell.playbackBlocked && (link.phase.kind !== "online" || link.phase.snapshot.stream.kind === "none")) {
+      shell = { ...shell, playbackBlocked: false };
+    }
     const notice = pairNotice;
     pairNotice = null;
     apply({ kind: "link", link, notice });
+    flushLaunchLogs();
     if (shouldAutoPair({
       previousPhase: previous,
       phase: link.phase.kind,
@@ -385,9 +448,14 @@ function sendCommand(command: SessionCommand): void {
       apply({ kind: "toast", toast: { kind: "error", text: rejection } });
       return;
     }
+    launchTrace.begin();
+    lastStreamLabel = "";
+    lastStartErrorLabel = "";
+    noteLaunch("play", `${command.appId} ${video.codec} ${video.width}x${video.height} ${video.fps}fps`);
     client.intent(command.kind === "start-session"
       ? { kind: "play", appId: command.appId, video }
       : { kind: "switch-app", appId: command.appId, video });
+    peer.primePlayback();
     return;
   }
   if (command.kind === "stop-session") {
@@ -409,6 +477,10 @@ function commitLibrary(id: string): void {
 }
 
 function activate(id: string): void {
+  if (id === "play-audio") {
+    peer.primePlayback();
+    return;
+  }
   const controls = toggleControl(controlPrefs(), id);
   if (controls) {
     installControlPrefs(controls);
@@ -679,6 +751,11 @@ function keySample(event: KeyboardEvent, type: "keydown" | "keyup"): KeySample {
 }
 
 document.addEventListener("keydown", (event) => {
+  if (shell.playbackBlocked && shell.screen === "stream" && keyAction(event.code, event.keyCode) === "activate") {
+    event.preventDefault();
+    peer.primePlayback();
+    return;
+  }
   const outcome = applyStreamKey({
     capturing: streamCapturing(),
     event: keySample(event, "keydown"),

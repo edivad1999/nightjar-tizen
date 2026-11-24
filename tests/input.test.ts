@@ -241,6 +241,10 @@ function installFakePeer(): { channels: FakeChannel[]; restore: () => void } {
   const previousMedia = globalThis.MediaStream;
   class FakeMediaStream {
     addTrack(): void {}
+    removeTrack(): void {}
+    getTracks(): never[] {
+      return [];
+    }
   }
   globalThis.MediaStream = FakeMediaStream as unknown as typeof MediaStream;
   class FakePeerConnection {

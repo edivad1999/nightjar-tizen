@@ -67,6 +67,8 @@ export type Shell = {
   lastAppByAddress: Record<string, string>;
   quitOnDisconnect: Record<string, boolean>;
   command: SessionCommand | null;
+  launchDebug: boolean;
+  playbackBlocked: boolean;
 };
 
 export type ShellAction =
@@ -100,6 +102,7 @@ export type ShellAction =
   | { kind: "toggle-more" }
   | { kind: "toggle-quit-on-disconnect" }
   | { kind: "toggle-locale" }
+  | { kind: "toggle-launch-debug" }
   | { kind: "remember-last"; appId: string }
   | { kind: "disconnect" }
   | { kind: "quit-host" }
@@ -124,6 +127,8 @@ export function initialShell(): Shell {
     lastAppByAddress: {},
     quitOnDisconnect: {},
     command: null,
+    launchDebug: true,
+    playbackBlocked: false,
   };
 }
 
@@ -613,6 +618,8 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
     }
     case "toggle-locale":
       return { ...shell, locale: shell.locale === "en" ? "it" : "en" };
+    case "toggle-launch-debug":
+      return { ...shell, launchDebug: !shell.launchDebug };
     case "remember-last":
       return { ...shell, lastAppByAddress: remember(shell, action.appId), selectedAppId: shell.selectedAppId ?? action.appId };
     case "disconnect":
@@ -656,6 +663,7 @@ const libraryControls = new Set([
   "setting-more",
   "setting-quit-on-disconnect",
   "setting-language",
+  "setting-launch-debug",
   "setting-help",
   "setting-resolution",
   "setting-fps",
@@ -700,6 +708,9 @@ export function activateFocused(shell: Shell, id: string): Shell {
   }
   if (id === "setting-language") {
     return reduceShell(shell, { kind: "toggle-locale" });
+  }
+  if (id === "setting-launch-debug") {
+    return reduceShell(shell, { kind: "toggle-launch-debug" });
   }
   if (id === "setting-help") {
     return reduceShell(shell, { kind: "open-help" });
