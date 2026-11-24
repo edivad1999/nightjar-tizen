@@ -12,6 +12,7 @@ export type SavedHost = {
   credentials: Credentials | null;
   autoWake?: boolean;
   nameLocked?: boolean;
+  lastUsed?: number;
 };
 
 export type Persisted = {
@@ -50,6 +51,7 @@ function host(value: unknown): SavedHost | null {
     : 8000;
   const macAddress = typeof value.macAddress === "string" ? normalizeMac(value.macAddress) : null;
   const storedId = typeof value.id === "string" ? value.id.trim().slice(0, 80) : "";
+  const lastUsed = usedRank(value.lastUsed);
   return {
     id: storedId || hostIdentity(value.address, port, macAddress),
     name: value.name.slice(0, 80) || value.address,
@@ -59,7 +61,19 @@ function host(value: unknown): SavedHost | null {
     credentials: credentials(value.credentials),
     autoWake: value.autoWake !== false,
     nameLocked: value.nameLocked === true,
+    ...(lastUsed > 0 ? { lastUsed } : {}),
   };
+}
+
+function usedRank(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.min(Math.floor(value), Number.MAX_SAFE_INTEGER);
+}
+
+function keptUse(incoming: SavedHost, matches: readonly SavedHost[]): number {
+  return matches.reduce((max, item) => Math.max(max, usedRank(item.lastUsed)), usedRank(incoming.lastUsed));
 }
 
 function settings(value: unknown): StreamSettings {
@@ -170,6 +184,7 @@ function foldHost(incoming: SavedHost, matches: readonly SavedHost[]): SavedHost
     }
     credentials = credentials ?? item.credentials;
   }
+  const lastUsed = keptUse(incoming, matches);
   return {
     id,
     name,
@@ -179,6 +194,7 @@ function foldHost(incoming: SavedHost, matches: readonly SavedHost[]): SavedHost
     credentials,
     autoWake: autoWake !== false,
     nameLocked: nameLocked === true,
+    ...(lastUsed > 0 ? { lastUsed } : {}),
   };
 }
 
@@ -188,6 +204,7 @@ export function upsertHosts(hosts: SavedHost[], incoming: SavedHost[]): SavedHos
     const matches = next.filter((item) => samePc(item, host));
     if (matches.length === 0) {
       const macAddress = host.macAddress;
+      const lastUsed = usedRank(host.lastUsed);
       next.push({
         id: host.id ?? hostIdentity(host.address, host.port, macAddress),
         name: host.name.trim().slice(0, 80) || host.address,
@@ -197,6 +214,7 @@ export function upsertHosts(hosts: SavedHost[], incoming: SavedHost[]): SavedHos
         credentials: host.credentials,
         autoWake: host.autoWake !== false,
         nameLocked: host.nameLocked === true,
+        ...(lastUsed > 0 ? { lastUsed } : {}),
       });
       continue;
     }

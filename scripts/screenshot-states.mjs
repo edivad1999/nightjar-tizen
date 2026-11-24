@@ -68,8 +68,11 @@ const mockShots = [
   ["settings", `http://127.0.0.1:${address.port}/preview.html?screen=settings`],
 ];
 
+const only = new Set((process.argv[3] ?? "").split(",").filter(Boolean));
 const framed = [
   "hosts-empty",
+  "hosts-one-online",
+  "hosts-one-offline",
   "hosts-list",
   "hosts-disabled",
   "hosts-it",
@@ -110,9 +113,15 @@ const framed = [
 
 try {
   for (const [name, url] of mockShots) {
+    if (only.size > 0 && !only.has(name)) {
+      continue;
+    }
     await shoot(browser, url, join(outDir, `${name}.png`));
   }
   for (const name of framed) {
+    if (only.size > 0 && !only.has(name)) {
+      continue;
+    }
     await shoot(browser, `http://127.0.0.1:${address.port}/preview.html?shot=${name}`, join(outDir, `${name}.png`));
   }
 } finally {
