@@ -7,7 +7,7 @@ import { authenticationProof, sha256 } from "../src/protocol/auth.ts";
 import { parseHostControl, readPad } from "../src/protocol/gamepad.ts";
 import { DISCOVER_DATAGRAM, parseDiscoveryReply, parseServerMessage } from "../src/protocol/parse.ts";
 import { COLOUR_SPACE_URI, prepareLocalAnswer, prepareRemoteOffer } from "../src/protocol/sdp.ts";
-import { magicPacket } from "../src/protocol/wol.ts";
+import { magicPacket, wakeShouldRetry } from "../src/protocol/wol.ts";
 
 test("sha256 and the pairing proof match the platform hmac", () => {
   assert.equal(Buffer.from(sha256(new Uint8Array())).toString("hex"), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
@@ -50,6 +50,11 @@ test("the colour-space extension is removed and the offered HEVC profile stays",
     "a=fmtp:96 level-id=153;profile-id=2;tier-flag=0",
     `a=extmap:9 ${COLOUR_SPACE_URI}`,
     "a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid",
+    "a=imageattr:96 send [x=[1920:1920],y=[1080:1080],fps=[60:60]]",
+    "a=msid:game video",
+    "m=audio 9 UDP/TLS/RTP/SAVPF 111",
+    "a=msid:game audio",
+    "a=ssrc:1001 msid:game audio",
     "",
   ].join("\r\n");
   const answer = [
@@ -64,6 +69,10 @@ test("the colour-space extension is removed and the offered HEVC profile stays",
   const remote = prepareRemoteOffer(offer);
   assert.equal(remote.includes(COLOUR_SPACE_URI), false);
   assert.equal(remote.includes("urn:ietf:params:rtp-hdrext:sdes:mid"), true);
+  assert.match(remote, /a=imageattr:96 send \[x=\[1920:1920\]/);
+  assert.match(remote, /m=video[\s\S]*a=msid:game video/);
+  assert.match(remote, /m=audio[\s\S]*a=msid:game-audio audio/);
+  assert.match(remote, /a=ssrc:1001 msid:game-audio audio/);
   const local = prepareLocalAnswer(offer, answer);
   assert.equal(local.includes(COLOUR_SPACE_URI), false);
   assert.match(local, /a=fmtp:96 level-id=153;profile-id=2;tier-flag=0/);
@@ -78,6 +87,8 @@ test("wake packet is 102 bytes and repeats the mac", () => {
   assert.equal(packet[96], 0x02);
   assert.equal(magicPacket("ff:ff:ff:ff:ff:ff"), null);
   assert.equal(normalizeMac("02-11-22-33-44-55"), "02:11:22:33:44:55");
+  assert.equal(wakeShouldRetry(5_000), true);
+  assert.equal(wakeShouldRetry(120_000), false);
 });
 
 test("gamepad A is bit 0 and rumble parses both protocol versions", () => {

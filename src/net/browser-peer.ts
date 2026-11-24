@@ -1,5 +1,14 @@
 import type { MediaPeer } from "./client.ts";
 
+function shortenVideoBuffer(receiver: RTCRtpReceiver): void {
+  if ("jitterBufferTarget" in receiver && typeof receiver.jitterBufferTarget !== "function") {
+    receiver.jitterBufferTarget = 0;
+  }
+  if ("playoutDelayHint" in receiver) {
+    receiver.playoutDelayHint = 0;
+  }
+}
+
 export class BrowserPeer implements MediaPeer {
   private pc: RTCPeerConnection | null = null;
   private control: RTCDataChannel | null = null;
@@ -20,6 +29,9 @@ export class BrowserPeer implements MediaPeer {
     this.media = new MediaStream();
     pc.ontrack = (event) => {
       this.media.addTrack(event.track);
+      if (event.track.kind === "video") {
+        shortenVideoBuffer(event.receiver);
+      }
       this.video.srcObject = this.media;
       void this.video.play();
     };

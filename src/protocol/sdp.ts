@@ -47,8 +47,34 @@ export function preserveVideoFmtp(offer: string, answer: string): string {
   return lines.join(nl);
 }
 
+const AUDIO_STREAM_SUFFIX = "-audio";
+
+function renamedStream(stream: string): string {
+  if (stream === "-" || stream.endsWith(AUDIO_STREAM_SUFFIX)) {
+    return stream;
+  }
+  return `${stream}${AUDIO_STREAM_SUFFIX}`;
+}
+
+export function separateAudioSync(sdp: string): string {
+  const nl = newline(sdp);
+  let inAudio = false;
+  return sdp.split(nl).map((line) => {
+    if (line.startsWith("m=")) {
+      inAudio = line.startsWith("m=audio");
+      return line;
+    }
+    if (!inAudio) {
+      return line;
+    }
+    return line
+      .replace(/^(a=msid:)(\S+)/, (_match, prefix: string, stream: string) => `${prefix}${renamedStream(stream)}`)
+      .replace(/^(a=ssrc:\d+ msid:)(\S+)/, (_match, prefix: string, stream: string) => `${prefix}${renamedStream(stream)}`);
+  }).join(nl);
+}
+
 export function prepareRemoteOffer(sdp: string): string {
-  return stripColourSpaceExtension(sdp);
+  return stripColourSpaceExtension(separateAudioSync(sdp));
 }
 
 export function prepareLocalAnswer(offer: string, answer: string): string {

@@ -1,5 +1,12 @@
 import { normalizeMac } from "../domain/ids.ts";
 
+export const WAKE_INTERVAL_MS = 5_000;
+export const WAKE_BUDGET_MS = 120_000;
+
+export function wakeShouldRetry(elapsedMs: number): boolean {
+  return elapsedMs < WAKE_BUDGET_MS;
+}
+
 export function magicPacket(mac: string): Uint8Array | null {
   const normalized = normalizeMac(mac);
   if (!normalized) {

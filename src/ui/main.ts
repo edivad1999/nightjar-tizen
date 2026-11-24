@@ -4,7 +4,7 @@ import { BrowserPeer } from "../net/browser-peer.ts";
 import { SignallingClient, type MediaPeer } from "../net/client.ts";
 import { connectedMessage, disconnectedMessage, padsEqual, parseHostControl, readPad, stateMessage, type PadAxes, type PadReading } from "../protocol/gamepad.ts";
 import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, keyframeMessage, parseDiscoveryReply } from "../protocol/parse.ts";
-import { magicPacket } from "../protocol/wol.ts";
+import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.ts";
 import { parsePersisted, serializePersisted, updateHost, upsertHosts, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { keyAction } from "./keys.ts";
@@ -58,6 +58,7 @@ let focusItems: FocusItem[] = [];
 const peer = new BrowserPeer(streamVideo);
 const pads = new Map<number, { sequence: number; last: PadAxes; announced: boolean; lastSent: number }>();
 const artRequested = new Set<string>();
+let wakeToken = 0;
 let stallSince = performance.now();
 let lastTime = 0;
 let keyframeSent = false;
@@ -349,14 +350,25 @@ function wakeHost(host: SavedHost): void {
     apply({ kind: "banner", text: "Wake needs the TV socket module. The address is saved." });
     return;
   }
+  const token = ++wakeToken;
+  const started = performance.now();
   bridge.wake(packet, host.address);
   apply({ kind: "banner", text: `Waking ${host.name}.` });
-  window.setTimeout(() => {
+  const retry = () => {
+    if (token !== wakeToken || !wakeShouldRetry(performance.now() - started)) {
+      return;
+    }
+    const phase = shell.link.phase.kind;
+    if (phase === "online" || phase === "pairing" || phase === "authenticating" || phase === "need-pair") {
+      return;
+    }
     const current = shell.hosts.find((item) => item.address === host.address);
     if (current) {
       connectHost(current);
     }
-  }, 5000);
+    window.setTimeout(retry, WAKE_INTERVAL_MS);
+  };
+  window.setTimeout(retry, WAKE_INTERVAL_MS);
 }
 
 document.addEventListener("keydown", (event) => {
