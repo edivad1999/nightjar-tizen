@@ -33,6 +33,19 @@ import { text, type StringKey } from "./strings.ts";
 export const MENU_STATS_ID = "menu-stats";
 export const MENU_LOGS_ID = "menu-logs";
 
+export function mountLaunchPanel(parent: ParentNode): HTMLElement {
+  const node = el("pre", "performance-hud launch-debug");
+  node.id = "launch-debug";
+  parent.append(node);
+  return node;
+}
+
+export function applyLaunchPanel(node: HTMLElement, text: string, shown: boolean): void {
+  node.hidden = !shown || text.length === 0;
+  node.textContent = text;
+  node.scrollTop = node.scrollHeight;
+}
+
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, label?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -340,7 +353,7 @@ export function focusMap(shell: Shell): FocusItem[] {
   }
   if (shell.screen === "stream") {
     if (!shell.menuOpen) {
-      return [];
+      return shell.playbackBlocked ? [{ id: "play-audio", row: 0, col: 0 }] : [];
     }
     return [
       { id: "menu-resume", row: 0, col: 0 },
@@ -389,7 +402,8 @@ export function focusMap(shell: Shell): FocusItem[] {
     }
     place(items, "setting-quit-on-disconnect", row, 0);
     place(items, "setting-language", row + 1, 0);
-    row += 2;
+    place(items, "setting-launch-debug", row + 2, 0);
+    row += 3;
     for (const id of CONTROL_IDS) {
       place(items, id, row, 0);
       row += 1;
@@ -750,6 +764,8 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       extra.append(button("setting-quit-on-disconnect", quitLabel(shell)));
       const language = shell.locale === "it" ? say(shell, "italian") : say(shell, "english");
       extra.append(button("setting-language", `${say(shell, "language")} · ${language}`));
+      const debug = shell.launchDebug ? say(shell, "on") : say(shell, "off");
+      extra.append(button("setting-launch-debug", `${say(shell, "launchDebug")} · ${debug}`));
       for (const row of controlRows(controlPrefs(), (key) => say(shell, key))) {
         extra.append(button(row.id, row.label));
       }
@@ -770,6 +786,9 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     if (!shell.menuOpen) {
       const state = stream.kind === "starting" ? stream.state : stream.kind === "live" ? "streaming" : "stream";
       page.append(el("p", "stream-hint", state === "streaming" ? say(shell, "backOpensMenu") : say(shell, "starting", { state })));
+      if (shell.playbackBlocked) {
+        page.append(button("play-audio", say(shell, "pressOkForSound"), "button primary playback-prompt"));
+      }
       page.classList.add("stream-clear");
     } else {
       const menu = el("section", "stream-menu");

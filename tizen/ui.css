@@ -416,6 +416,30 @@ button, input { font-family: inherit; }
 .performance-hud-right dt { color: var(--muted); font-family: var(--font-text); }
 .performance-hud-right dd { font-weight: 400; }
 
+.launch-debug {
+  top: auto;
+  left: auto;
+  right: var(--safe-x);
+  bottom: 96px;
+  z-index: 6;
+  max-width: 720px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 20px;
+  line-height: 1.35;
+}
+
+.playback-prompt {
+  position: fixed;
+  left: 50%;
+  top: 22%;
+  transform: translateX(-50%);
+  z-index: 6;
+  width: auto;
+  min-width: 480px;
+}
+
 .game-page {
   display: grid;
   grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);

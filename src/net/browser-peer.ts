@@ -159,6 +159,7 @@ export class BrowserPeer implements MediaPeer {
   private onControl: ((text: string) => void) | null = null;
   private onCandidate: ((candidate: string, mid: string) => void) | null = null;
   private onFailed: ((failure: MediaFailure) => void) | null = null;
+  private onPlayback: ((state: "playing" | "muted" | "blocked", detail: string) => void) | null = null;
   private stopWatch: (() => void) | null = null;
   private media = new MediaStream();
   private offerSdp = "";
@@ -168,19 +169,30 @@ export class BrowserPeer implements MediaPeer {
     this.video = video;
   }
 
+  /**
+   * Call from the Play click, after the previous picture is closed, and do not await it.
+   * An empty stream can leave play() pending until a track arrives.
+   */
+  primePlayback(): void {
+    this.playCurrent();
+  }
+
+  setPlaybackHandler(handler: ((state: "playing" | "muted" | "blocked", detail: string) => void) | null): void {
+    this.onPlayback = handler;
+  }
+
   async acceptOffer(sdp: string, openInput = false): Promise<void> {
-    this.close();
+    this.releaseConnection();
     this.offerSdp = sdp;
+    this.clearTracks();
     const pc = new RTCPeerConnection({ iceServers: [] });
     this.pc = pc;
-    this.media = new MediaStream();
     pc.ontrack = (event) => {
       this.media.addTrack(event.track);
       if (event.track.kind === "video") {
         shortenVideoBuffer(event.receiver);
       }
-      this.video.srcObject = this.media;
-      void this.video.play();
+      this.playCurrent();
     };
     pc.onicecandidate = (event) => {
       const candidate = event.candidate;
@@ -239,13 +251,9 @@ export class BrowserPeer implements MediaPeer {
   }
 
   close(): void {
-    this.stopWatch?.();
-    this.stopWatch = null;
-    this.control = null;
-    this.gamepad = null;
-    this.input = null;
-    this.pc?.close();
-    this.pc = null;
+    this.releaseConnection();
+    this.clearTracks();
+    this.media = new MediaStream();
     this.video.srcObject = null;
   }
 
@@ -286,7 +294,7 @@ export class BrowserPeer implements MediaPeer {
     const current = this.video.srcObject;
     this.video.srcObject = null;
     this.video.srcObject = current;
-    void this.video.play();
+    this.notePlayback(this.video.play());
   }
 
   async stats(): Promise<RTCStatsReport | null> {
@@ -306,5 +314,44 @@ export class BrowserPeer implements MediaPeer {
 
   gamepadBufferedAmount(): number {
     return this.gamepad?.bufferedAmount ?? 0;
+  }
+
+  private playCurrent(): void {
+    if (this.video.srcObject !== this.media) {
+      this.video.srcObject = this.media;
+    }
+    this.video.muted = false;
+    this.notePlayback(this.video.play());
+  }
+
+  private notePlayback(pending: Promise<void> | undefined): void {
+    void pending?.then(() => {
+      this.onPlayback?.("playing", "");
+    }).catch((error: unknown) => {
+      const name = error instanceof Error ? error.name : "blocked";
+      this.video.muted = true;
+      void this.video.play()?.then(() => {
+        this.onPlayback?.("muted", name);
+      }).catch(() => {
+        this.onPlayback?.("blocked", name);
+      });
+    });
+  }
+
+  private clearTracks(): void {
+    for (const track of this.media.getTracks()) {
+      this.media.removeTrack(track);
+      track.stop();
+    }
+  }
+
+  private releaseConnection(): void {
+    this.stopWatch?.();
+    this.stopWatch = null;
+    this.control = null;
+    this.gamepad = null;
+    this.input = null;
+    this.pc?.close();
+    this.pc = null;
   }
 }

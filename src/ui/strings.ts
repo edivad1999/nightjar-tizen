@@ -119,6 +119,8 @@ const catalogs = {
     flipXy: "Swap X and Y",
     rumble: "Rumble",
     swapMouse: "Swap mouse buttons",
+    launchDebug: "Launch debug",
+    pressOkForSound: "Press OK for sound",
   },
   it: {
     wordmark: "Nightjar",
@@ -238,6 +240,8 @@ const catalogs = {
     flipXy: "Scambia X e Y",
     rumble: "Vibrazione",
     swapMouse: "Scambia i tasti del mouse",
+    launchDebug: "Debug di avvio",
+    pressOkForSound: "Premi OK per l'audio",
   },
 } as const;
 
