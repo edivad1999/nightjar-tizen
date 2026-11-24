@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { mkdir, readFile, writeFile, cp, rm } from "node:fs/promises";
 import { deflateRawSync, deflateSync } from "node:zlib";
@@ -7,6 +8,15 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const stage = join(root, "staging");
 const dist = join(root, "dist");
+const wolOut = join(root, "build/wake-on-lan");
+
+const compiled = spawnSync("bash", [join(root, "scripts/build-wake-on-lan.sh"), wolOut], {
+  cwd: root,
+  stdio: "inherit",
+});
+if (compiled.status !== 0) {
+  throw new Error("Wake-on-LAN module failed to build");
+}
 
 await rm(stage, { recursive: true, force: true });
 await mkdir(stage, { recursive: true });
@@ -24,9 +34,25 @@ await build({
 await cp(join(root, "tizen/index.html"), join(stage, "index.html"));
 await cp(join(root, "tizen/ui.css"), join(stage, "ui.css"));
 await cp(join(root, "tizen/config.xml"), join(stage, "config.xml"));
+await mkdir(join(stage, "wasm"), { recursive: true });
+await cp(join(root, "tizen/wasm/nightjar-udp.js"), join(stage, "wasm/nightjar-udp.js"));
+for (const name of ["wake-on-lan.js", "wake-on-lan.wasm", "wake-on-lan.worker.js", "wake-on-lan.js.mem"]) {
+  await cp(join(wolOut, name), join(stage, "wasm", name));
+}
 await writeFile(join(stage, "icon.png"), png(117, 117, 16, 20, 28));
 
-const files = ["config.xml", "index.html", "app.js", "ui.css", "icon.png"];
+const files = [
+  "config.xml",
+  "index.html",
+  "app.js",
+  "ui.css",
+  "icon.png",
+  "wasm/nightjar-udp.js",
+  "wasm/wake-on-lan.js",
+  "wasm/wake-on-lan.wasm",
+  "wasm/wake-on-lan.worker.js",
+  "wasm/wake-on-lan.js.mem",
+];
 const parts = files.map(async (name) => ({ name, data: await readFile(join(stage, name)) }));
 const output = join(dist, "nightjar.wgt");
 await writeFile(output, widgetZip([
