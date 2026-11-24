@@ -1,5 +1,5 @@
 name: Set up the widget build
-description: Node 22, the Samsung Emscripten 1.39.4.7 cache, and npm ci. npm run build downloads the SDK and applies the libxml2 and ICU loader fix in scripts/build-wake-on-lan.sh.
+description: Node 22, the Samsung Emscripten 1.39.4.7 cache, and npm ci. The cache key includes the Ubuntu 24.04 libxml2 and ICU files that scripts/build-wake-on-lan.sh puts next to the SDK.
 
 runs:
   using: composite
@@ -10,6 +10,7 @@ runs:
     - uses: actions/cache@v4
       with:
         path: ~/.cache/samsung-emscripten
-        key: samsung-emscripten-1.39.4.7
+        key: samsung-emscripten-1.39.4.7-hostlibs
+        restore-keys: samsung-emscripten-1.39.4.7
     - shell: bash
       run: npm ci
