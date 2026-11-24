@@ -10,7 +10,7 @@ test("a key down and a mouse move are sent as input JSON on the channel the peer
   try {
     const video = fakeVideo();
     const peer = new BrowserPeer(video);
-    await peer.acceptOffer("v=0\r\n");
+    await peer.acceptOffer("v=0\r\n", true);
     const session = new InputSession((text) => peer.sendInput(text));
     const key = applyStreamKey({
       capturing: true,
@@ -218,6 +218,9 @@ function streamingShell(): Shell {
           stream: { kind: "live", appId: "7", state: "streaming", sessionId: 1 },
           banner: null,
           mouseMode: false,
+          sunshineAvailable: null,
+          negotiated: null,
+          lastStartError: null,
         },
       },
     },

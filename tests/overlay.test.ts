@@ -191,6 +191,7 @@ test("a diagnostics line is queued every five seconds while send logs is on", ()
 
   health.noteHostMessage({
     code: "unsupported-message",
+    requestType: "client-log",
     message: "Unsupported message type: client-log",
   });
   health.ingestStats([video({ timestamp: 10000, framesDecoded: 240 })], context);

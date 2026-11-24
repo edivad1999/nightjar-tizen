@@ -47,6 +47,9 @@ function snapshot(apps: AppEntry[], extensions: HostExtensions, stream: HostSnap
     stream,
     banner: null,
     mouseMode: false,
+    sunshineAvailable: null,
+    negotiated: null,
+    lastStartError: null,
   };
 }
 

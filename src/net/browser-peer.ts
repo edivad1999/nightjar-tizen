@@ -1,6 +1,139 @@
 import type { AudioChannels } from "../domain/settings.ts";
 import { prepareLocalAnswer } from "../protocol/sdp.ts";
-import type { MediaPeer } from "./client.ts";
+import type { MediaFailure, MediaPeer } from "./client.ts";
+
+export const CONNECTED_TIMEOUT_MS = 30_000;
+export const INBOUND_RTP_TIMEOUT_MS = 8_000;
+
+type InboundStat = {
+  type?: string;
+  bytesReceived?: number;
+  packetsReceived?: number;
+};
+
+export type WatchedPeer = {
+  connectionState(): string;
+  iceState(): string;
+  listen(onConnection: () => void, onIce: () => void): void;
+  stats(): Promise<{ forEach(visit: (stat: InboundStat) => void): void } | null>;
+};
+
+type WatchTiming = {
+  connectedMs?: number;
+  inboundMs?: number;
+  schedule?: (fn: () => void, ms: number) => () => void;
+};
+
+function browserSchedule(fn: () => void, ms: number): () => void {
+  const timer = setTimeout(fn, ms);
+  return () => clearTimeout(timer);
+}
+
+export function watchPeer(peer: WatchedPeer, onFailed: (why: string) => void, timing?: WatchTiming): () => void {
+  const connectedMs = timing?.connectedMs ?? CONNECTED_TIMEOUT_MS;
+  const inboundMs = timing?.inboundMs ?? INBOUND_RTP_TIMEOUT_MS;
+  const schedule = timing?.schedule ?? browserSchedule;
+  let over = false;
+  let connected = peer.connectionState() === "connected";
+  let cancelConnected: (() => void) | null = null;
+  let cancelInbound: (() => void) | null = null;
+
+  const stop = () => {
+    over = true;
+    cancelConnected?.();
+    cancelInbound?.();
+    cancelConnected = null;
+    cancelInbound = null;
+  };
+  const fail = (why: string) => {
+    if (over || peer.connectionState() === "closed") {
+      stop();
+      return;
+    }
+    stop();
+    onFailed(why);
+  };
+  const armInbound = () => {
+    if (over || cancelInbound) {
+      return;
+    }
+    cancelInbound = schedule(() => {
+      cancelInbound = null;
+      if (over) {
+        return;
+      }
+      void inboundArrived().then((arrived) => {
+        if (over) {
+          return;
+        }
+        if (arrived) {
+          stop();
+          return;
+        }
+        fail("no inbound rtp");
+      });
+    }, inboundMs);
+  };
+  const inboundArrived = async (): Promise<boolean> => {
+    const report = await peer.stats();
+    if (!report) {
+      return true;
+    }
+    try {
+      let found = false;
+      report.forEach((stat) => {
+        if (stat.type === "inbound-rtp" && ((stat.bytesReceived ?? 0) > 0 || (stat.packetsReceived ?? 0) > 0)) {
+          found = true;
+        }
+      });
+      return found;
+    } catch {
+      return false;
+    }
+  };
+
+  peer.listen(
+    () => {
+      if (over) {
+        return;
+      }
+      const state = peer.connectionState();
+      if (state === "connected") {
+        connected = true;
+        cancelConnected?.();
+        cancelConnected = null;
+        armInbound();
+        return;
+      }
+      if (state === "failed") {
+        fail("connection failed");
+        return;
+      }
+      if (state === "closed") {
+        stop();
+      }
+    },
+    () => {
+      if (over) {
+        return;
+      }
+      if (peer.iceState() === "failed") {
+        fail("ice failed");
+      }
+    },
+  );
+  if (!connected) {
+    cancelConnected = schedule(() => {
+      cancelConnected = null;
+      if (!over && !connected && peer.connectionState() !== "closed") {
+        fail("not connected");
+      }
+    }, connectedMs);
+  } else {
+    armInbound();
+  }
+  return stop;
+}
 
 /** Ordered and reliable, which is the only `input` channel the host keeps. */
 export function openInputChannel(peer: {
@@ -25,6 +158,8 @@ export class BrowserPeer implements MediaPeer {
   private input: RTCDataChannel | null = null;
   private onControl: ((text: string) => void) | null = null;
   private onCandidate: ((candidate: string, mid: string) => void) | null = null;
+  private onFailed: ((failure: MediaFailure) => void) | null = null;
+  private stopWatch: (() => void) | null = null;
   private media = new MediaStream();
   private offerSdp = "";
   private readonly video: HTMLVideoElement;
@@ -33,7 +168,7 @@ export class BrowserPeer implements MediaPeer {
     this.video = video;
   }
 
-  async acceptOffer(sdp: string): Promise<void> {
+  async acceptOffer(sdp: string, openInput = false): Promise<void> {
     this.close();
     this.offerSdp = sdp;
     const pc = new RTCPeerConnection({ iceServers: [] });
@@ -68,7 +203,9 @@ export class BrowserPeer implements MediaPeer {
       }
     };
     await pc.setRemoteDescription({ type: "offer", sdp });
-    this.input = openInputChannel(pc);
+    if (openInput) {
+      this.input = openInputChannel(pc);
+    }
   }
 
   async createAnswer(channels: AudioChannels = 2): Promise<string> {
@@ -77,10 +214,20 @@ export class BrowserPeer implements MediaPeer {
       throw new Error("The TV has no peer connection");
     }
     const answer = await pc.createAnswer();
-    if (channels === 6 || channels === 8) {
-      answer.sdp = prepareLocalAnswer(this.offerSdp, answer.sdp ?? "", channels);
-    }
+    answer.sdp = prepareLocalAnswer(this.offerSdp, answer.sdp ?? "", channels);
     await pc.setLocalDescription(answer);
+    this.stopWatch?.();
+    this.stopWatch = watchPeer({
+      connectionState: () => pc.connectionState,
+      iceState: () => pc.iceConnectionState,
+      listen(onConnection, onIce) {
+        pc.addEventListener("connectionstatechange", onConnection);
+        pc.addEventListener("iceconnectionstatechange", onIce);
+      },
+      stats: () => pc.getStats(),
+    }, (why) => {
+      this.onFailed?.({ why, sdp: this.offerSdp });
+    });
     return pc.localDescription?.sdp ?? answer.sdp ?? "";
   }
 
@@ -92,6 +239,8 @@ export class BrowserPeer implements MediaPeer {
   }
 
   close(): void {
+    this.stopWatch?.();
+    this.stopWatch = null;
     this.control = null;
     this.gamepad = null;
     this.input = null;
@@ -127,6 +276,10 @@ export class BrowserPeer implements MediaPeer {
 
   setCandidateHandler(handler: ((candidate: string, mid: string) => void) | null): void {
     this.onCandidate = handler;
+  }
+
+  setFailureHandler(handler: ((failure: MediaFailure) => void) | null): void {
+    this.onFailed = handler;
   }
 
   reattach(): void {

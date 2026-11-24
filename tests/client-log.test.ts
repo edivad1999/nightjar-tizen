@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createClientLog } from "../src/net/client-log.ts";
+import { connectionFailedLine, createClientLog } from "../src/net/client-log.ts";
+import { createStreamHealth } from "../src/ui/stream-health.ts";
 import {
   MAX_CLIENT_LOG_LINE_LENGTH,
   MAX_CLIENT_LOG_LINES,
@@ -66,9 +67,30 @@ test("turning logs off or an unsupported host drops the queue", () => {
   log.noteUnsupported();
   log.push("still ignored");
   assert.deepEqual(log.flush(() => true), []);
+  assert.equal(isUnsupportedClientLog({
+    code: "unsupported-message",
+    requestType: "client-log",
+    message: "Unsupported message type: client-log",
+  }), true);
+  assert.equal(isUnsupportedClientLog({
+    code: "unsupported-message",
+    requestType: "start-session",
+    message: "client-log",
+  }), false);
+  const health = createStreamHealth({ sendLogs: true });
+  health.noteHostMessage({ code: "unsupported-message", requestType: "client-log", message: "no" });
+  assert.equal(health.logsEnabled(), false);
+});
+
+test("a connection failure is one client-log line the host can warn on", () => {
+  const sdp = [
+    "v=0",
+    "a=candidate:1 1 udp 2122260223 192.168.1.9 8001 typ host",
+    "",
+  ].join("\r\n");
   assert.equal(
-    isUnsupportedClientLog({ code: "unsupported-message", message: "Unsupported message type: client-log" }),
-    true,
+    connectionFailedLine("ice failed", sdp, "Nightjar TV"),
+    "connection failed: ice failed, offered 192.168.1.9:8001, Nightjar TV",
   );
-  assert.equal(isUnsupportedClientLog({ code: "invalid-message", message: "client-log" }), false);
+  assert.match(connectionFailedLine("not connected", "v=0", "Nightjar TV"), /offered unknown:0/);
 });

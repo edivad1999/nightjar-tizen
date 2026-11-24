@@ -3,11 +3,19 @@ import {
   clientLogMessage,
   type ClientLogMessage,
 } from "../protocol/parse.ts";
+import { offeredEndpoint } from "../protocol/sdp.ts";
 
 const MAX_PENDING = 500;
 const FLUSH_MS = 1000;
 
 export { FLUSH_MS as CLIENT_LOG_FLUSH_MS };
+
+export function connectionFailedLine(why: string, sdp: string, userAgent?: string): string {
+  const agent = userAgent && userAgent.length > 0
+    ? userAgent
+    : (globalThis.navigator?.userAgent || "Nightjar TV");
+  return `connection failed: ${why}, offered ${offeredEndpoint(sdp)}, ${agent}`;
+}
 
 export type ClientLog = {
   setEnabled(enabled: boolean): void;

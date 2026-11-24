@@ -15,13 +15,36 @@ import {
   switchSessionMessage,
   type AppEntry,
   type Credentials,
+  type EchoedAudio,
+  type EchoedVideo,
   type ServerMessage,
 } from "./parse.ts";
+
+export const HOST_CLOSE_REPLACED = 4000;
+export const HOST_CLOSE_POLICY = 1008;
+
+const START_REQUESTS = new Set(["start-session", "switch-session", "answer"]);
 
 export type StreamPhase =
   | { kind: "none" }
   | { kind: "starting"; appId: string; state: string; sessionId: number | null }
   | { kind: "live"; appId: string; state: string; sessionId: number };
+
+export type StartError = {
+  code: string;
+  message: string;
+  appId: string;
+};
+
+export type NegotiatedStream = {
+  video: EchoedVideo | null;
+  audio: EchoedAudio | null;
+};
+
+export type LaunchedStream = {
+  appId: string;
+  video: StreamSettings;
+};
 
 export type HostSnapshot = {
   hostName: string;
@@ -35,6 +58,9 @@ export type HostSnapshot = {
   stream: StreamPhase;
   banner: string | null;
   mouseMode: boolean;
+  sunshineAvailable: boolean | null;
+  negotiated: NegotiatedStream | null;
+  lastStartError: StartError | null;
 };
 
 export type Phase =
@@ -55,6 +81,10 @@ export type LinkState = {
   macAddress: string | null;
   pendingModes: VideoMode[] | null;
   pendingExtensions: HostExtensions | null;
+  sunshineAvailable: boolean | null;
+  signedIn: boolean;
+  launched: LaunchedStream | null;
+  resume: LaunchedStream | null;
   phase: Phase;
 };
 
@@ -63,13 +93,15 @@ export type Effect =
   | { kind: "store-credentials"; credentials: Credentials }
   | { kind: "drop-credentials" }
   | { kind: "store-mac"; macAddress: string }
-  | { kind: "apply-offer"; sessionId: number; sdp: string; channels: AudioChannels }
+  | { kind: "apply-offer"; sessionId: number; sdp: string; channels: AudioChannels; openInput: boolean }
+  | { kind: "stop-retry" }
   | { kind: "apply-candidate"; sessionId: number; candidate: string; mid: string }
   | { kind: "close-media" };
 
 export type Intent =
   | { kind: "connected" }
-  | { kind: "closed" }
+  | { kind: "closed"; code?: number; reason?: string }
+  | { kind: "resume-timeout" }
   | { kind: "server"; message: ServerMessage }
   | { kind: "pair"; pin: string }
   | { kind: "list-apps" }
@@ -102,6 +134,10 @@ export function initialLink(credentials: Credentials | null): LinkState {
     macAddress: null,
     pendingModes: null,
     pendingExtensions: null,
+    sunshineAvailable: null,
+    signedIn: false,
+    launched: null,
+    resume: null,
     phase: { kind: "idle" },
   };
 }
@@ -135,6 +171,9 @@ function emptySnapshot(hostName: string, modes: VideoMode[]): HostSnapshot {
     stream: { kind: "none" },
     banner: null,
     mouseMode: false,
+    sunshineAvailable: null,
+    negotiated: null,
+    lastStartError: null,
   };
 }
 
@@ -233,17 +272,21 @@ function presentedCredentials(state: LinkState): boolean {
 
 function onError(state: LinkState, message: Extract<ServerMessage, { kind: "error" }>, context: StepContext): StepResult {
   if (message.code === "authentication-failed") {
+    const ended = { ...state, signedIn: false, resume: null, launched: null };
     if (!presentedCredentials(state)) {
-      return { state: project(state, reducePairing(state.pairing, { type: "before-auth" })), effects: [] };
+      return { state: project(ended, reducePairing(state.pairing, { type: "before-auth" })), effects: [] };
     }
     const pairing = reducePairing(state.pairing, { type: "auth-failed" });
     if (pairing.kind !== "failed") {
-      return { state: project(state, pairing), effects: [] };
+      return { state: project(ended, pairing), effects: [] };
     }
-    return withPhase(project(state, pairing), { kind: "need-pair" }, [{ kind: "drop-credentials" }]);
+    return withPhase(project(ended, pairing), { kind: "need-pair" }, [{ kind: "drop-credentials" }]);
   }
   if (message.code === "client-disabled") {
-    return withPhase(state, { kind: "disabled", message: message.message });
+    return withPhase(
+      { ...state, signedIn: false, resume: null, launched: null },
+      { kind: "disabled", message: message.message },
+    );
   }
   if (message.code === "pairing-cancelled") {
     const pairing = reducePairing(state.pairing, { type: "pin-cancelled" });
@@ -263,6 +306,22 @@ function onError(state: LinkState, message: Extract<ServerMessage, { kind: "erro
     return { state: project(state, reducePairing(state.pairing, { type: "not-authenticated" })), effects: [] };
   }
   const snapshot = online(state);
+  if (snapshot && message.requestType === "stop-session" && snapshot.stream.kind === "none" && snapshot.banner) {
+    return same(state);
+  }
+  if (snapshot && snapshot.stream.kind !== "none" && START_REQUESTS.has(message.requestType)) {
+    const appId = snapshot.stream.appId;
+    return replaceSnapshot(
+      { ...state, resume: null, launched: null },
+      {
+        ...snapshot,
+        stream: { kind: "none" },
+        banner: message.message,
+        lastStartError: { code: message.code, message: message.message, appId },
+      },
+      [{ kind: "close-media" }],
+    );
+  }
   if (snapshot) {
     return replaceSnapshot(state, { ...snapshot, banner: message.message });
   }
@@ -273,7 +332,11 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
   switch (message.kind) {
     case "auth-required": {
       const effects: Effect[] = [];
-      const next = rememberMac({ ...state, nonce: message.nonce }, message.macAddress, effects);
+      const next = rememberMac({
+        ...state,
+        nonce: message.nonce,
+        sunshineAvailable: message.sunshineAvailable ?? state.sunshineAvailable,
+      }, message.macAddress, effects);
       if (message.pairing !== "client-pin") {
         return withPhase(next, {
           kind: "fault",
@@ -297,7 +360,15 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
       return withPhase(next, { kind: "need-pair" }, effects);
     }
     case "authenticated":
-      return same(state);
+      return { state: { ...state, signedIn: true }, effects: [] };
+    case "sunshine-availability": {
+      const next = { ...state, sunshineAvailable: message.available };
+      const snapshot = online(next);
+      if (!snapshot) {
+        return { state: next, effects: [] };
+      }
+      return replaceSnapshot(next, { ...snapshot, sunshineAvailable: message.available });
+    }
     case "paired": {
       if (state.pairing.kind !== "pairing") {
         return same(state);
@@ -314,19 +385,30 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
         });
       }
       return {
-        state: project(state, pairing),
+        state: project({ ...state, signedIn: true }, pairing),
         effects: [{ kind: "store-credentials", credentials: pairing.credentials }],
       };
     }
     case "gateway-status": {
       const effects: Effect[] = [];
-      let next = rememberMac(state, message.macAddress, effects);
+      let next = rememberMac({ ...state, signedIn: true }, message.macAddress, effects);
       const modes = next.pendingModes ?? [];
       const snapshot = emptySnapshot(message.gatewayName, modes);
       snapshot.extensions = next.pendingExtensions ?? STEREO_EXTENSIONS;
       snapshot.sessionActive = message.sessionActive;
       snapshot.runningAppId = message.runningAppId;
+      snapshot.sunshineAvailable = next.sunshineAvailable;
       next = { ...next, pendingModes: null, pendingExtensions: null };
+      const target = next.resume;
+      if (target) {
+        snapshot.audioChannels = target.video.audioChannels;
+        snapshot.stream = { kind: "starting", appId: target.appId, state: "reconnecting", sessionId: null };
+        effects.push({
+          kind: "send",
+          text: startSessionMessage(target.appId, videoFields(target.video), target.video.audioChannels),
+        });
+        next = { ...next, resume: null };
+      }
       effects.push({ kind: "send", text: getAppsMessage() });
       return withPhase(next, { kind: "online", snapshot }, effects);
     }
@@ -373,7 +455,15 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
       if (!snapshot) {
         return same(state);
       }
-      return replaceSnapshot(state, applySession(snapshot, message.state, message.sessionId, message.message));
+      const applied = applySession(snapshot, message.state, message.sessionId, message.message);
+      const negotiated = message.video || message.audio
+        ? { video: message.video, audio: message.audio }
+        : snapshot.negotiated;
+      const ended = applied.stream.kind === "none";
+      return replaceSnapshot(
+        { ...state, launched: ended ? null : state.launched, resume: ended ? null : state.resume },
+        { ...applied, negotiated },
+      );
     }
     case "host-session-status": {
       const snapshot = online(state);
@@ -381,12 +471,15 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
         return same(state);
       }
       const stopped = message.state === "stopped" || message.state === "failed";
-      return replaceSnapshot(state, {
-        ...snapshot,
-        runningAppId: stopped ? null : (message.runningAppId ?? snapshot.runningAppId),
-        stream: stopped ? { kind: "none" } : snapshot.stream,
-        banner: message.state === "failed" ? (message.message ?? "The PC could not switch games") : snapshot.banner,
-      });
+      return replaceSnapshot(
+        stopped ? { ...state, launched: null, resume: null } : state,
+        {
+          ...snapshot,
+          runningAppId: stopped ? null : (message.runningAppId ?? snapshot.runningAppId),
+          stream: stopped ? { kind: "none" } : snapshot.stream,
+          banner: message.state === "failed" ? (message.message ?? "The PC could not switch games") : snapshot.banner,
+        },
+      );
     }
     case "error":
       return onError(state, message, context);
@@ -403,7 +496,13 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
         ? snapshot.stream
         : { kind: "starting" as const, appId: snapshot.stream.appId, state: snapshot.stream.state, sessionId: message.sessionId };
       return replaceSnapshot(state, { ...snapshot, stream }, [
-        { kind: "apply-offer", sessionId: message.sessionId, sdp: message.sdp, channels: snapshot.audioChannels },
+        {
+          kind: "apply-offer",
+          sessionId: message.sessionId,
+          sdp: message.sdp,
+          channels: snapshot.audioChannels,
+          openInput: snapshot.extensions.input !== null,
+        },
       ]);
     }
     case "candidate": {
@@ -430,11 +529,51 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
 export function step(state: LinkState, intent: Intent, context: StepContext): StepResult {
   switch (intent.kind) {
     case "connected":
-      return withPhase(state, { kind: "wait-auth" }, [{ kind: "close-media" }]);
-    case "closed":
-      return withPhase(project(state, reducePairing(state.pairing, { type: "transport" })), { kind: "idle" }, [
-        { kind: "close-media" },
-      ]);
+      return withPhase({ ...state, signedIn: false }, { kind: "wait-auth" }, [{ kind: "close-media" }]);
+    case "closed": {
+      const code = intent.code ?? 1006;
+      const reason = intent.reason ?? "";
+      const transported = project({ ...state, signedIn: false }, reducePairing(state.pairing, { type: "transport" }));
+      if (code === HOST_CLOSE_REPLACED || code === HOST_CLOSE_POLICY) {
+        const message = reason || (code === HOST_CLOSE_REPLACED
+          ? "Opened in another tab or browser"
+          : "The PC closed the connection");
+        return withPhase(
+          { ...transported, resume: null, launched: null },
+          { kind: "fault", code: code === HOST_CLOSE_REPLACED ? "replaced" : "policy", message },
+          [{ kind: "close-media" }, { kind: "stop-retry" }],
+        );
+      }
+      const snapshot = online(state);
+      const resume = snapshot && snapshot.stream.kind !== "none" && state.launched
+        ? { appId: snapshot.stream.appId, video: state.launched.video }
+        : state.resume;
+      return withPhase(
+        { ...transported, resume },
+        { kind: "idle" },
+        [{ kind: "close-media" }],
+      );
+    }
+    case "resume-timeout": {
+      const snapshot = online(state);
+      const reconnecting = snapshot?.stream.kind === "starting" && snapshot.stream.state === "reconnecting";
+      if (!state.resume && !reconnecting) {
+        return same(state);
+      }
+      const appId = state.resume?.appId
+        ?? (snapshot && snapshot.stream.kind !== "none" ? snapshot.stream.appId : "");
+      const message = "The stream did not reconnect";
+      const cleared = { ...state, resume: null, launched: null };
+      if (snapshot) {
+        return replaceSnapshot(cleared, {
+          ...snapshot,
+          stream: { kind: "none" },
+          banner: message,
+          lastStartError: { code: "reconnect-timeout", message, appId },
+        }, [{ kind: "close-media" }]);
+      }
+      return withPhase(cleared, { kind: "fault", code: "reconnect-timeout", message });
+    }
     case "server":
       return onServer(state, intent.message, context);
     case "pair": {
@@ -469,34 +608,32 @@ export function step(state: LinkState, intent: Intent, context: StepContext): St
         return same(state);
       }
       const channels = fitAudio(intent.video.audioChannels, snapshot.extensions);
-      const video = videoFields(intent.video);
+      const video = { ...intent.video, audioChannels: channels };
       const text = intent.kind === "play"
-        ? startSessionMessage(intent.appId, video, channels)
-        : switchSessionMessage(intent.appId, video, channels);
-      return replaceSnapshot(state, {
-        ...snapshot,
-        audioChannels: channels,
-        banner: null,
-        stream: { kind: "starting", appId: intent.appId, state: "starting", sessionId: null },
-      }, [{ kind: "close-media" }, { kind: "send", text }]);
+        ? startSessionMessage(intent.appId, videoFields(video), channels)
+        : switchSessionMessage(intent.appId, videoFields(video), channels);
+      return replaceSnapshot(
+        { ...state, launched: { appId: intent.appId, video }, resume: null },
+        {
+          ...snapshot,
+          audioChannels: channels,
+          banner: null,
+          lastStartError: null,
+          stream: { kind: "starting", appId: intent.appId, state: "starting", sessionId: null },
+        },
+        [{ kind: "close-media" }, { kind: "send", text }],
+      );
     }
-    case "disconnect-stream": {
-      const snapshot = online(state);
-      if (!snapshot) {
-        return same(state);
-      }
-      return replaceSnapshot(state, { ...snapshot, stream: { kind: "none" } }, [
-        { kind: "send", text: stopSessionMessage() },
-        { kind: "close-media" },
-      ]);
-    }
+    case "disconnect-stream":
     case "quit-game": {
-      const snapshot = online(state);
+      const cleared = { ...state, launched: null, resume: null };
+      const snapshot = online(cleared);
       if (!snapshot) {
-        return same(state);
+        return { state: cleared, effects: [] };
       }
-      return replaceSnapshot(state, { ...snapshot, stream: { kind: "none" } }, [
-        { kind: "send", text: stopHostSessionMessage() },
+      const text = intent.kind === "disconnect-stream" ? stopSessionMessage() : stopHostSessionMessage();
+      return replaceSnapshot(cleared, { ...snapshot, stream: { kind: "none" } }, [
+        { kind: "send", text },
         { kind: "close-media" },
       ]);
     }
@@ -517,12 +654,20 @@ export function step(state: LinkState, intent: Intent, context: StepContext): St
       return { state, effects: [{ kind: "send", text: candidateMessage(intent.sessionId, intent.candidate, intent.mid) }] };
     }
     case "media-failed": {
-      const snapshot = online(state);
+      const cleared = { ...state, resume: null, launched: null };
+      const snapshot = online(cleared);
       if (!snapshot) {
-        return withPhase(state, { kind: "fault", code: "media", message: intent.message });
+        return withPhase(cleared, { kind: "fault", code: "media", message: intent.message });
       }
-      return replaceSnapshot(state, { ...snapshot, banner: intent.message, stream: { kind: "none" } }, [
+      const appId = snapshot.stream.kind === "none" ? "" : snapshot.stream.appId;
+      return replaceSnapshot(cleared, {
+        ...snapshot,
+        banner: intent.message,
+        stream: { kind: "none" },
+        lastStartError: appId ? { code: "media", message: intent.message, appId } : snapshot.lastStartError,
+      }, [
         { kind: "close-media" },
+        { kind: "send", text: stopSessionMessage() },
       ]);
     }
     default: {

@@ -32,6 +32,7 @@ class FakePeer implements MediaPeer {
   sendControl(): void {}
   setControlHandler(): void {}
   setCandidateHandler(): void {}
+  setFailureHandler(): void {}
 }
 
 test("pairing then a second connection answers a host offer without the colour-space extension", async () => {

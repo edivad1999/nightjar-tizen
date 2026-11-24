@@ -27,6 +27,8 @@ const mode: VideoMode = {
   defaultCodec: "hevc",
   defaultBitrateKbps: 20000,
   experimental: false,
+  hdrSupported: true,
+  hdrExperimental: true,
 };
 
 function server(payload: string) {
@@ -146,6 +148,8 @@ test("codec frame rates from the extension are offered for that codec only", () 
     defaultCodec: "hevc",
     defaultBitrateKbps: 30000,
     experimental: true,
+    hdrSupported: true,
+    hdrExperimental: true,
   };
   const extensions: HostExtensions = {
     audioChannels: [2, 6, 8],
@@ -256,6 +260,7 @@ test("a 5.1 answer is rewritten to the documented multiopus layout and still dro
   assert.match(local, /a=fmtp:96 level-id=153;profile-id=2;tier-flag=0/);
   assert.match(local, /a=rtpmap:111 multiopus\/48000\/6/);
   assert.match(local, /a=fmtp:111 channel_mapping=0,4,1,2,3,5;num_streams=4;coupled_streams=2;minptime=10;useinbandfec=1/);
+  assert.equal(local.includes("stereo=1"), false);
   assert.equal(local.includes("opus/48000/2"), false);
   const again = prepareLocalAnswer(offer, local, 6);
   assert.match(again, /a=fmtp:111 channel_mapping=0,4,1,2,3,5;num_streams=4;coupled_streams=2;minptime=10;useinbandfec=1/);
@@ -266,7 +271,11 @@ test("a 5.1 answer is rewritten to the documented multiopus layout and still dro
 
   const stereo = prepareLocalAnswer(offer, answer);
   assert.match(stereo, /a=rtpmap:111 opus\/48000\/2/);
+  assert.match(stereo, /a=fmtp:111 minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1/);
   assert.equal(stereo.includes("multiopus"), false);
   assert.equal(stereo.includes(COLOUR_SPACE_URI), false);
+  const twice = prepareLocalAnswer(offer, stereo);
+  assert.equal(twice.match(/(?:^|[;])stereo=1/g)?.length, 1);
+  assert.equal(twice.match(/sprop-stereo=1/g)?.length, 1);
   assert.throws(() => prepareLocalAnswer(offer, "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n", 6), /opus/);
 });
