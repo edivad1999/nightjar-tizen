@@ -214,8 +214,11 @@ test("a host reads as online, unpaired, or disabled", () => {
     link: { ...initialLink(paired.credentials), phase: { kind: "disabled", message: "This TV is disabled in Rubylight" } },
   });
   assert.equal(hostStatus(shell, paired), "disabled");
-  assert.equal(shell.screen, "hosts");
-  assert.equal(shell.banner, "This TV is disabled in Rubylight");
+  assert.equal(shell.screen, "pair");
+  assert.equal(shell.association.kind, "pair");
+  if (shell.association.kind === "pair") {
+    assert.deepEqual(shell.association.view, { kind: "rejected", message: "This TV is disabled in Rubylight" });
+  }
 });
 
 test("arrow keys reach every control on the library, game page, and settings", () => {
@@ -300,5 +303,5 @@ test("english and italian catalogs cover the game page", () => {
 test("illegal hdr is cleared by the shell settings reducer", () => {
   const shell = reduceShell(initialShell(), { kind: "settings", patch: { codec: "h264", hdr: true } });
   assert.equal(shell.settings.hdr, false);
-  assert.equal(shell.banner, null);
+  assert.deepEqual(shell.toast, { kind: "hidden" });
 });

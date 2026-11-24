@@ -83,6 +83,23 @@ const framed = [
   "stream-hint",
   "overlay",
   "banner",
+  "toast-waking",
+  "address-invalid",
+  "address-letters",
+  "discover-searching",
+  "discover-none",
+  "discover-blocked",
+  "discover-results",
+  "pair-checking",
+  "pair-paired",
+  "pair-failed",
+  "pair-timeout",
+  "pair-retry",
+  "pair-rejected",
+  "pair-it",
+  "forget-confirm",
+  "help",
+  "help-it",
 ];
 
 try {

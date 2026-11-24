@@ -1,4 +1,4 @@
-import { isHostAddress, randomPin, signallingUrl } from "../domain/ids.ts";
+import { randomPin, signallingUrl } from "../domain/ids.ts";
 import { frameRateMaximum, probeTv, readVideoReceiverCapabilities, tvReceivesAv1 } from "../domain/probe.ts";
 import {
   BITRATES_KBPS,
@@ -29,7 +29,7 @@ import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.
 import { parsePersisted, serializePersisted, updateHost, upsertHosts, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
-import { activateFocused, initialShell, isLibraryControl, reduceShell, type SessionCommand, type Shell } from "./model.ts";
+import { activateFocused, addressDraft, addressIssue, initialShell, isLibraryControl, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import type { Locale } from "./strings.ts";
 import { applyStreamView, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
@@ -169,6 +169,7 @@ let capturingInput = false;
 const pads = new Map<number, { sequence: number; last: PadAxes; announced: boolean; lastSent: number }>();
 const artRequested = new Set<string>();
 let wakeToken = 0;
+let searchToken = 0;
 let probedModes = "";
 let presentedFrames = 0;
 let presentedWatching = false;
@@ -228,13 +229,33 @@ function rememberHost(address: string, patch: Partial<SavedHost>): void {
   persist();
 }
 
+let pairNotice: PairNotice | null = null;
+
+function noticeFor(code: string, message: string): PairNotice | null {
+  if (code === "pairing-expired") {
+    return { kind: "timed-out" };
+  }
+  if (code === "incorrect-pin" || code === "pairing-failed") {
+    return { kind: "retry" };
+  }
+  if (code === "client-disabled") {
+    return { kind: "rejected", message };
+  }
+  if (code === "pairing-cancelled" || code === "authentication-failed" || code === "not-authenticated") {
+    return { kind: "failed", message };
+  }
+  return null;
+}
+
 const client = new SignallingClient(peer satisfies MediaPeer, {
   clientName: CLIENT_NAME,
   nextPin: () => randomPin((bound) => Math.floor(Math.random() * bound)),
 }, {
   onState: (link) => {
     const previous = shell.link.phase.kind;
-    apply({ kind: "link", link });
+    const notice = pairNotice;
+    pairNotice = null;
+    apply({ kind: "link", link, notice });
     if (link.phase.kind === "need-pair" && (previous === "wait-auth" || previous === "authenticating")) {
       queueMicrotask(() => {
         client.intent({ kind: "pair", pin: randomPin((bound) => Math.floor(Math.random() * bound)) });
@@ -279,6 +300,7 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
   },
   onServerError: (code, message) => {
     health.noteHostMessage({ code, message });
+    pairNotice = noticeFor(code, message);
   },
 }, (url) => new WebSocket(url));
 
@@ -328,7 +350,7 @@ function sendCommand(command: SessionCommand): void {
     const video = fittedPlaySettings();
     const rejection = settingsRejection(video, phase.snapshot.modes, phase.snapshot.extensions);
     if (rejection) {
-      apply({ kind: "banner", text: rejection });
+      apply({ kind: "toast", toast: { kind: "error", text: rejection } });
       return;
     }
     client.intent(command.kind === "start-session"
@@ -365,6 +387,41 @@ function activate(id: string): void {
   }
   if (id === "save-host") {
     saveAddress();
+    return;
+  }
+  if (id === "help-hosts" || id === "setting-help") {
+    apply({ kind: "open-help" });
+    return;
+  }
+  if (id === "help-done" || id === "pair-cancel" || id === "pair-back" || id === "discover-cancel" || id === "forget-cancel") {
+    apply({ kind: "back" });
+    return;
+  }
+  if (id === "pair-done") {
+    apply({ kind: "finish-pair" });
+    return;
+  }
+  if (id === "discover-manual") {
+    apply({ kind: "open-add" });
+    return;
+  }
+  if (id.startsWith("key-")) {
+    const key = id.slice("key-".length);
+    if (key === "letters") {
+      apply({ kind: "address-board", board: "letters" });
+    } else if (key === "digits") {
+      apply({ kind: "address-board", board: "digits" });
+    } else if (key === "delete") {
+      apply({ kind: "address-key", key: "delete" });
+    } else if (key === "dot") {
+      apply({ kind: "address-key", key: "." });
+    } else if (key === "colon") {
+      apply({ kind: "address-key", key: ":" });
+    } else if (key === "hyphen") {
+      apply({ kind: "address-key", key: "-" });
+    } else {
+      apply({ kind: "address-key", key });
+    }
     return;
   }
   if (id === "new-pin") {
@@ -445,21 +502,33 @@ function activate(id: string): void {
   const forget = /^forget-(\d+)$/.exec(id);
   if (forget) {
     const saved = shell.hosts[Number(forget[1])];
-    if (!saved) {
-      return;
+    if (saved) {
+      apply({ kind: "ask-forget", address: saved.address });
     }
-    if (shell.activeAddress === saved.address) {
+    return;
+  }
+  if (id === "forget-confirm") {
+    if (shell.association.kind === "forget" && shell.activeAddress === shell.association.address) {
       client.close();
     }
-    apply({ kind: "hosts", hosts: shell.hosts.filter((item) => item.address !== saved.address) });
+    apply({ kind: "forget-confirm" });
+    return;
+  }
+  const found = /^found-(\d+)$/.exec(id);
+  if (found && shell.association.kind === "discover") {
+    const address = shell.association.addresses[Number(found[1])];
+    const saved = shell.hosts.find((item) => item.address === address);
+    if (saved) {
+      connectHost(saved);
+    }
   }
 }
 
 function saveAddress(): void {
-  const input = document.getElementById("address-input");
-  const address = input instanceof HTMLInputElement ? input.value.trim() : "";
-  if (!isHostAddress(address)) {
-    apply({ kind: "banner", text: "Enter a PC address, for example 192.168.1.10" });
+  const address = addressDraft(shell).trim();
+  const problem = addressIssue(address);
+  if (problem !== "none") {
+    apply({ kind: "address-problem", problem });
     return;
   }
   const host: SavedHost = {
@@ -478,17 +547,23 @@ function saveAddress(): void {
 }
 
 async function search(): Promise<void> {
+  const token = ++searchToken;
   const bridge = globalThis.NightjarUdp;
+  apply({ kind: "discover-start" });
   if (!bridge) {
-    apply({ kind: "banner", text: "This TV cannot send UDP. Enter the PC address." });
+    apply({ kind: "discover-blocked" });
     return;
   }
-  apply({ kind: "banner", text: "Searching this network." });
   let replies: BroadcastReply[];
   try {
     replies = await bridge.broadcast(new TextEncoder().encode(DISCOVER_DATAGRAM), DISCOVERY_PORT, DISCOVERY_TIMEOUT_MS);
-  } catch (error) {
-    apply({ kind: "banner", text: error instanceof Error ? error.message : "Search failed." });
+  } catch {
+    if (token === searchToken) {
+      apply({ kind: "discover-blocked" });
+    }
+    return;
+  }
+  if (token !== searchToken) {
     return;
   }
   const found = hostsFromReplies(replies);
@@ -500,27 +575,25 @@ async function search(): Promise<void> {
     credentials: shell.hosts.find((saved) => saved.macAddress === item.macAddress)?.credentials ?? null,
   })));
   apply({ kind: "hosts", hosts });
-  apply({ kind: "banner", text: found.length === 0 ? "No Rubylight PC answered." : `Found ${found.length} PC${found.length === 1 ? "" : "s"}.` });
+  if (shell.screen === "discover") {
+    apply({ kind: "discover-finish", addresses: found.map((item) => item.address) });
+  }
 }
 
 function wakeHost(host: SavedHost): void {
   if (!host.macAddress) {
-    apply({ kind: "banner", text: "This PC has no wake address yet. Open it once while it is on." });
+    apply({ kind: "toast", toast: { kind: "wake-missing" } });
     return;
   }
   const packet = magicPacket(host.macAddress);
   const bridge = globalThis.NightjarUdp;
-  if (!packet || !bridge) {
-    apply({ kind: "banner", text: "Wake needs the TV socket module. The address is saved." });
-    return;
-  }
-  if (bridge.wake(packet, host.address) === false) {
-    apply({ kind: "banner", text: "Wake needs the TV socket module. The address is saved." });
+  if (!packet || !bridge || bridge.wake(packet, host.address) === false) {
+    apply({ kind: "toast", toast: { kind: "wake-unavailable" } });
     return;
   }
   const token = ++wakeToken;
   const started = performance.now();
-  apply({ kind: "banner", text: `Waking ${host.name}.` });
+  apply({ kind: "toast", toast: { kind: "waking", name: host.name } });
   const retry = () => {
     if (token !== wakeToken || !wakeShouldRetry(performance.now() - started)) {
       return;
@@ -536,6 +609,28 @@ function wakeHost(host: SavedHost): void {
     window.setTimeout(retry, WAKE_INTERVAL_MS);
   };
   window.setTimeout(retry, WAKE_INTERVAL_MS);
+}
+
+function addressKeyFrom(event: KeyboardEvent): string | null {
+  if (event.keyCode === 8) {
+    return "delete";
+  }
+  if (/^Digit[0-9]$/.test(event.code)) {
+    return event.code.slice("Digit".length);
+  }
+  if (/^Numpad[0-9]$/.test(event.code)) {
+    return event.code.slice("Numpad".length);
+  }
+  if (event.key === "." || event.code === "Period" || event.code === "NumpadDecimal") {
+    return ".";
+  }
+  if (event.key === ":" || event.key === "-") {
+    return event.key;
+  }
+  if (/^[a-z]$/i.test(event.key) && event.key.length === 1) {
+    return event.key.toLowerCase();
+  }
+  return null;
 }
 
 function keySample(event: KeyboardEvent, type: "keydown" | "keyup"): KeySample {
@@ -559,16 +654,16 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     return;
   }
+  if (shell.screen === "add") {
+    const typed = addressKeyFrom(event);
+    if (typed) {
+      event.preventDefault();
+      apply({ kind: "address-key", key: typed });
+      return;
+    }
+  }
   const action = keyAction(event.code, event.keyCode);
   if (!action) {
-    return;
-  }
-  const typing = document.activeElement instanceof HTMLInputElement;
-  if (typing && (action === "left" || action === "right" || action === "activate")) {
-    if (action === "activate") {
-      event.preventDefault();
-      activate("save-host");
-    }
     return;
   }
   event.preventDefault();

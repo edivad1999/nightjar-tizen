@@ -86,8 +86,17 @@ export function shellForShot(name: string): Shell | null {
   }
   if (name === "hosts-disabled") {
     let shell = online(library);
-    shell = reduceShell(shell, { kind: "open-hosts" });
-    return reduceShell(shell, {
+    shell = reduceShell(shell, {
+      kind: "link",
+      link: {
+        ...initialLink(credentials),
+        phase: { kind: "disabled", message: "This TV is disabled in Rubylight" },
+      },
+    });
+    return reduceShell(shell, { kind: "open-hosts" });
+  }
+  if (name === "pair-rejected") {
+    return reduceShell(online(library), {
       kind: "link",
       link: {
         ...initialLink(credentials),
@@ -132,7 +141,104 @@ export function shellForShot(name: string): Shell | null {
     return shell;
   }
   if (name === "banner") {
-    return reduceShell(initialShell(), { kind: "banner", text: "No Rubylight PC answered." });
+    return reduceShell(initialShell(), { kind: "toast", toast: { kind: "error", text: "No Rubylight PC answered." } });
+  }
+  if (name === "toast-waking") {
+    let shell = reduceShell(initialShell(), {
+      kind: "hosts",
+      hosts: [host("Living room", "192.168.1.20", true, "02:00:00:00:00:0A")],
+    });
+    return reduceShell(shell, { kind: "toast", toast: { kind: "waking", name: "Living room" } });
+  }
+  if (name === "address-invalid" || name === "address-letters") {
+    let shell = reduceShell(initialShell(), { kind: "open-add" });
+    if (name === "address-letters") {
+      shell = reduceShell(shell, { kind: "address-board", board: "letters" });
+      for (const key of "livingroom") {
+        shell = reduceShell(shell, { kind: "address-key", key });
+      }
+      return shell;
+    }
+    shell = reduceShell(shell, { kind: "address-key", key: "9" });
+    shell = reduceShell(shell, { kind: "address-key", key: "9" });
+    return reduceShell(shell, { kind: "address-problem", problem: "invalid" });
+  }
+  if (name === "discover-searching") {
+    return reduceShell(initialShell(), { kind: "discover-start" });
+  }
+  if (name === "discover-none" || name === "discover-blocked" || name === "discover-results") {
+    let shell = reduceShell(initialShell(), {
+      kind: "hosts",
+      hosts: [
+        host("Living room", "192.168.1.20", false, "02:00:00:00:00:0A"),
+        host("Den", "192.168.1.30", false),
+      ],
+    });
+    if (name === "discover-blocked") {
+      return reduceShell(shell, { kind: "discover-blocked" });
+    }
+    return reduceShell(shell, {
+      kind: "discover-finish",
+      addresses: name === "discover-none" ? [] : ["192.168.1.20", "192.168.1.30"],
+    });
+  }
+  if (name === "pair-checking" || name === "pair-paired" || name === "pair-failed" || name === "pair-timeout" || name === "pair-retry" || name === "pair-it") {
+    let shell = reduceShell(initialShell(), {
+      kind: "link",
+      link: { ...initialLink(null), phase: { kind: "pairing", pin: pin("4821") } },
+    });
+    if (name === "pair-it") {
+      return reduceShell(shell, { kind: "toggle-locale" });
+    }
+    if (name === "pair-checking") {
+      return reduceShell(shell, {
+        kind: "link",
+        link: { ...initialLink(null), phase: { kind: "authenticating" } },
+      });
+    }
+    if (name === "pair-timeout") {
+      return reduceShell(shell, {
+        kind: "link",
+        link: { ...initialLink(null), phase: { kind: "pairing", pin: pin("9033") } },
+        notice: { kind: "timed-out" },
+      });
+    }
+    if (name === "pair-retry") {
+      return reduceShell(shell, {
+        kind: "link",
+        link: { ...initialLink(null), phase: { kind: "pairing", pin: pin("1140") } },
+        notice: { kind: "retry" },
+      });
+    }
+    if (name === "pair-failed") {
+      return reduceShell(shell, {
+        kind: "link",
+        link: { ...initialLink(null), phase: { kind: "need-pair" } },
+        notice: { kind: "failed", message: "The PC cancelled pairing." },
+      });
+    }
+    shell = reduceShell(shell, {
+      kind: "link",
+      link: {
+        ...initialLink(credentials),
+        phase: { kind: "online", snapshot: snapshot(library, STEREO_EXTENSIONS, { kind: "none" }) },
+      },
+    });
+    return shell;
+  }
+  if (name === "forget-confirm") {
+    let shell = reduceShell(initialShell(), {
+      kind: "hosts",
+      hosts: [host("Den", "192.168.1.30", false)],
+    });
+    return reduceShell(shell, { kind: "ask-forget", address: "192.168.1.30" });
+  }
+  if (name === "help" || name === "help-it") {
+    let shell = reduceShell(initialShell(), { kind: "open-help" });
+    if (name === "help-it") {
+      shell = reduceShell(shell, { kind: "toggle-locale" });
+    }
+    return shell;
   }
   return null;
 }
