@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import puppeteer from "puppeteer-core";
 
@@ -52,16 +52,19 @@ await new Promise((resolve, reject) => {
   mock.on("exit", (code) => reject(new Error(`mock host exited ${code}`)));
 });
 
+const outDir = process.env.SCREENSHOT_DIR ?? "screenshots";
+await mkdir(outDir, { recursive: true });
+
 const browser = await puppeteer.launch({
-  executablePath: "/usr/bin/google-chrome",
+  executablePath: process.env.CHROME_PATH ?? "/usr/bin/google-chrome",
   headless: true,
   args: ["--no-sandbox", "--disable-gpu"],
 });
 
 const shots = [
-  ["library", "/opt/cursor/artifacts/library.png"],
-  ["game", "/opt/cursor/artifacts/game-page.png"],
-  ["settings", "/opt/cursor/artifacts/settings.png"],
+  ["library", join(outDir, "library.png")],
+  ["game", join(outDir, "game-page.png")],
+  ["settings", join(outDir, "settings.png")],
 ];
 
 try {
