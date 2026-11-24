@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { localPointer, routeStreamKey } from "../src/input/local-input.ts";
 import { BrowserPeer, openInputChannel } from "../src/net/browser-peer.ts";
 import { InputSession, Wheel, encodeInputMessage, pointerMessages, textMessages } from "../src/protocol/input.ts";
-import { applyStreamKey, keyAction, leavesForTv, streamKeyDecision } from "../src/ui/keys.ts";
+import { applyStreamKey, keyAction, leavesForTv, streamKeyDecision, type KeySample } from "../src/ui/keys.ts";
 import { text } from "../src/ui/strings.ts";
 import { initialShell, reduceShell, type Shell } from "../src/ui/model.ts";
 
@@ -144,6 +146,184 @@ test("swap mouse buttons exchanges the left and right clicks sent to the PC", ()
   assert.deepEqual(left.map(encodeInputMessage), ['{"v":1,"type":"mouse-button","button":2,"down":true}']);
   const right = pointerMessages({ ...sample, buttons: 2 });
   assert.deepEqual(right.map(encodeInputMessage), ['{"v":1,"type":"mouse-button","button":0,"down":true}']);
+});
+
+const motion = {
+  movementX: 0,
+  movementY: 0,
+  clientX: 0,
+  clientY: 0,
+  buttons: 0,
+  previousButtons: 0,
+  previousPoint: null as { x: number; y: number } | null,
+  swapButtons: false,
+};
+
+test("pointer lock sends a relative move, and a refused lock turns later positions into deltas", () => {
+  const locked = localPointer({
+    ...motion,
+    locked: true,
+    movementX: -3,
+    movementY: 5,
+    previousPoint: { x: 10, y: 10 },
+  });
+  assert.deepEqual(locked.messages.map(encodeInputMessage), [
+    '{"v":1,"type":"mouse-move","dx":-3,"dy":5}',
+  ]);
+  assert.equal(locked.point, null);
+
+  const origin = localPointer({
+    ...motion,
+    locked: false,
+    clientX: 100,
+    clientY: 40,
+    buttons: 1,
+    previousPoint: locked.point,
+  });
+  assert.deepEqual(origin.messages.map(encodeInputMessage), [
+    '{"v":1,"type":"mouse-button","button":0,"down":true}',
+  ]);
+  assert.deepEqual(origin.point, { x: 100, y: 40 });
+
+  const delta = localPointer({
+    ...motion,
+    locked: false,
+    clientX: 112,
+    clientY: 31,
+    previousPoint: origin.point,
+    buttons: 1,
+    previousButtons: 1,
+  });
+  assert.deepEqual(delta.messages.map(encodeInputMessage), [
+    '{"v":1,"type":"mouse-move","dx":12,"dy":-9}',
+  ]);
+  assert.equal(delta.messages.some((message) => message.type === "mouse-position"), false);
+});
+
+test("touch and pen do not move the PC pointer", () => {
+  const touch = localPointer({
+    ...motion,
+    locked: true,
+    pointerType: "touch",
+    movementX: 4,
+    movementY: 4,
+    buttons: 1,
+    previousPoint: { x: 8, y: 9 },
+  });
+  assert.deepEqual(touch.messages, []);
+  assert.deepEqual(touch.point, { x: 8, y: 9 });
+  const pen = localPointer({
+    ...motion,
+    locked: false,
+    pointerType: "pen",
+    clientX: 3,
+    clientY: 3,
+    buttons: 1,
+    previousPoint: { x: 1, y: 1 },
+  });
+  assert.deepEqual(pen.messages, []);
+  assert.deepEqual(pen.point, { x: 1, y: 1 });
+});
+
+test("local pointer swap still exchanges the left and right buttons", () => {
+  const left = localPointer({ ...motion, locked: true, buttons: 1, swapButtons: true });
+  assert.deepEqual(left.messages.map(encodeInputMessage), [
+    '{"v":1,"type":"mouse-button","button":2,"down":true}',
+  ]);
+  const right = localPointer({ ...motion, locked: true, buttons: 2, swapButtons: true });
+  assert.deepEqual(right.messages.map(encodeInputMessage), [
+    '{"v":1,"type":"mouse-button","button":0,"down":true}',
+  ]);
+});
+
+function key(code: string, keyName: string, keyCode: number): KeySample {
+  return { type: "keydown", code, key: keyName, keyCode };
+}
+
+test("a hardware keyboard goes to the PC and does not navigate the stream menu", () => {
+  const arrow = key("ArrowLeft", "ArrowLeft", 37);
+  assert.equal(keyAction(arrow.code, arrow.keyCode), "left");
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: false,
+    enabled: true,
+    event: arrow,
+  }), { kind: "ignore" });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: true,
+    event: arrow,
+  }), { kind: "host", code: "ArrowLeft", down: true });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: true,
+    event: key("KeyA", "a", 65),
+  }), { kind: "host", code: "KeyA", down: true });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: true,
+    event: { type: "keyup", code: "KeyA", key: "a", keyCode: 65 },
+  }), { kind: "host", code: "KeyA", down: false });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: true,
+    event: key("ShiftLeft", "Shift", 16),
+  }), { kind: "host", code: "ShiftLeft", down: true });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: true,
+    event: key("AltLeft", "Alt", 18),
+  }), { kind: "host", code: "AltLeft", down: true });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: false,
+    event: key("KeyA", "a", 65),
+  }), { kind: "ignore" });
+  assert.deepEqual(routeStreamKey({
+    onStream: false,
+    capturing: false,
+    enabled: true,
+    event: key("KeyA", "a", 65),
+  }), { kind: "ui" });
+});
+
+test("the remote still owns the stream UI", () => {
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: true,
+    event: key("", "ArrowLeft", 37),
+  }), { kind: "ui" });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: false,
+    enabled: true,
+    event: key("", "XF86Back", 10009),
+  }), { kind: "ui" });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: true,
+    event: key("", "Menu", 18),
+  }), { kind: "ui" });
+  assert.deepEqual(routeStreamKey({
+    onStream: true,
+    capturing: true,
+    enabled: true,
+    event: key("Exit", "Exit", 10182),
+  }), { kind: "ui" });
+});
+
+test("the stream page stylesheet hides the pointer", () => {
+  const css = readFileSync(new URL("../tizen/ui.css", import.meta.url), "utf8");
+  assert.match(css, /#stream\s*\{[^}]*cursor:\s*none/);
+  assert.match(css, /\.hide-pointer,\s*\.hide-pointer \*\s*\{[^}]*cursor:\s*none/);
 });
 
 test("an unlocked mouse sends a position and a button, not a relative move", () => {

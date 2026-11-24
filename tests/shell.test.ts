@@ -530,6 +530,38 @@ const SAME_IN_BOTH = new Set<StringKey>([
   "italian",
 ]);
 
+test("the stream page hides the pointer", () => {
+  let shell = withApps([app("celeste", "Celeste", true)], "celeste");
+  const phase = shell.link.phase;
+  if (phase.kind !== "online") {
+    throw new Error("expected a stream");
+  }
+  shell = reduceShell(shell, {
+    kind: "link",
+    link: {
+      ...shell.link,
+      phase: {
+        kind: "online",
+        snapshot: {
+          ...phase.snapshot,
+          stream: { kind: "live", appId: "celeste", state: "streaming", sessionId: 2 },
+        },
+      },
+    },
+  });
+  assert.equal(shell.screen, "stream");
+  const root = installDocument();
+  render(root as unknown as HTMLElement, shell);
+  const playing = root.querySelector("main");
+  assert.match(playing?.className ?? "", /hide-pointer/);
+  assert.match(playing?.className ?? "", /stream-clear/);
+  shell = reduceShell(shell, { kind: "back" });
+  render(root as unknown as HTMLElement, shell);
+  const menu = root.querySelector("main");
+  assert.match(menu?.className ?? "", /hide-pointer/);
+  assert.equal((menu?.className ?? "").includes("stream-clear"), false);
+});
+
 test("Italian has no untranslated strings", () => {
   const missing: string[] = [];
   for (const key of stringKeys()) {
