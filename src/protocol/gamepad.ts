@@ -116,18 +116,90 @@ function envelope(type: string, fields: Record<string, unknown>): string {
   return JSON.stringify({ v: 2, type, ...fields });
 }
 
-export function connectedMessage(controllerId: number, pad: PadReading): string {
+export type HapticReport = {
+  dualRumble: boolean;
+  triggerRumble: boolean;
+};
+
+/**
+ * `effects === null` means the pad has no actuator.
+ * An empty list means the actuator did not report names, which still counts as dual rumble.
+ */
+export function hapticCapabilities(effects: readonly string[] | null): HapticReport {
+  if (effects === null) {
+    return { dualRumble: false, triggerRumble: false };
+  }
+  return {
+    dualRumble: effects.length === 0 || effects.includes("dual-rumble"),
+    triggerRumble: effects.includes("trigger-rumble"),
+  };
+}
+
+export function connectedMessage(controllerId: number, pad: PadReading, haptics: HapticReport, browserIndex = controllerId - 1): string {
   return envelope("gamepad-connected", {
     controllerId,
-    index: controllerId - 1,
-    browserIndex: controllerId - 1,
+    index: browserIndex,
+    browserIndex,
     id: (pad.id ?? "gamepad").slice(0, 512),
     mapping: (pad.mapping ?? "").slice(0, 128),
     buttons: pad.buttons.length,
     axes: pad.axes.length,
-    dualRumble: true,
-    triggerRumble: false,
+    dualRumble: haptics.dualRumble,
+    triggerRumble: haptics.triggerRumble,
   });
+}
+
+export const RUMBLE_DURATION_MS = 5000;
+
+export type RumblePlay =
+  | { kind: "stop" }
+  | {
+      kind: "dual-rumble";
+      duration: number;
+      strongMagnitude: number;
+      weakMagnitude: number;
+    }
+  | {
+      kind: "trigger-rumble";
+      duration: number;
+      strongMagnitude: number;
+      weakMagnitude: number;
+      leftTrigger: number;
+      rightTrigger: number;
+    };
+
+/** Zero magnitudes stop the actuator. Trigger motors are used only when the pad reported them. */
+export function rumblePlay(
+  control: { strongMagnitude: number; weakMagnitude: number; leftTrigger: number; rightTrigger: number },
+  haptics: HapticReport,
+  enabled: boolean,
+): RumblePlay {
+  if (!enabled) {
+    return { kind: "stop" };
+  }
+  const strong = control.strongMagnitude;
+  const weak = control.weakMagnitude;
+  const left = control.leftTrigger;
+  const right = control.rightTrigger;
+  if (haptics.triggerRumble && (left > 0 || right > 0)) {
+    return {
+      kind: "trigger-rumble",
+      duration: RUMBLE_DURATION_MS,
+      strongMagnitude: strong,
+      weakMagnitude: weak,
+      leftTrigger: left,
+      rightTrigger: right,
+    };
+  }
+  if (haptics.dualRumble && (strong > 0 || weak > 0)) {
+    return {
+      kind: "dual-rumble",
+      duration: RUMBLE_DURATION_MS,
+      strongMagnitude: strong,
+      weakMagnitude: weak,
+    };
+  }
+  return { kind: "stop" };
 }
 
 export function stateMessage(controllerId: number, sequence: number, timestampMs: number, axes: PadAxes): string {

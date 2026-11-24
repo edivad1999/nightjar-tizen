@@ -115,6 +115,10 @@ const catalogs = {
     waking: "Waking {name}.",
     wakeMissing: "This PC has no wake address yet. Open it once while it is on.",
     wakeUnavailable: "Wake needs the TV socket module. The address is saved.",
+    flipAb: "Swap A and B",
+    flipXy: "Swap X and Y",
+    rumble: "Rumble",
+    swapMouse: "Swap mouse buttons",
   },
   it: {
     wordmark: "Nightjar",
@@ -230,6 +234,10 @@ const catalogs = {
     waking: "Riattivazione di {name}.",
     wakeMissing: "Questo PC non ha ancora un indirizzo di riattivazione. Aprilo una volta mentre è acceso.",
     wakeUnavailable: "La riattivazione richiede il modulo di rete della TV. L'indirizzo resta salvato.",
+    flipAb: "Scambia A e B",
+    flipXy: "Scambia X e Y",
+    rumble: "Vibrazione",
+    swapMouse: "Scambia i tasti del mouse",
   },
 } as const;
 

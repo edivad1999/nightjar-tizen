@@ -113,6 +113,24 @@ test("Exit, Menu and colour keys map to host codes, and a keyboard Alt stays Alt
   assert.equal(shell.focusId, "add-host");
 });
 
+test("swap mouse buttons exchanges the left and right clicks sent to the PC", () => {
+  const sample = {
+    locked: true,
+    movementX: 0,
+    movementY: 0,
+    clientX: 0,
+    clientY: 0,
+    previousButtons: 0,
+    box: { left: 0, top: 0, width: 10, height: 10 },
+    video: { width: 10, height: 10 },
+    swapButtons: true,
+  };
+  const left = pointerMessages({ ...sample, buttons: 1 });
+  assert.deepEqual(left.map(encodeInputMessage), ['{"v":1,"type":"mouse-button","button":2,"down":true}']);
+  const right = pointerMessages({ ...sample, buttons: 2 });
+  assert.deepEqual(right.map(encodeInputMessage), ['{"v":1,"type":"mouse-button","button":0,"down":true}']);
+});
+
 test("an unlocked mouse sends a position and a button, not a relative move", () => {
   const messages = pointerMessages({
     locked: false,

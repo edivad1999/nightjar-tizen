@@ -27,6 +27,7 @@ import {
   type Shell,
 } from "./model.ts";
 import { applyStreamView, type OverlayNodes } from "./overlay.ts";
+import { CONTROL_IDS, controlPrefs, controlRows } from "./controls-settings.ts";
 import { text, type StringKey } from "./strings.ts";
 
 export const MENU_STATS_ID = "menu-stats";
@@ -388,7 +389,12 @@ export function focusMap(shell: Shell): FocusItem[] {
     }
     place(items, "setting-quit-on-disconnect", row, 0);
     place(items, "setting-language", row + 1, 0);
-    place(items, "setting-help", row + 2, 0);
+    row += 2;
+    for (const id of CONTROL_IDS) {
+      place(items, id, row, 0);
+      row += 1;
+    }
+    place(items, "setting-help", row, 0);
     return items;
   }
   place(items, "setting-help", 5, 0);
@@ -744,6 +750,9 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       extra.append(button("setting-quit-on-disconnect", quitLabel(shell)));
       const language = shell.locale === "it" ? say(shell, "italian") : say(shell, "english");
       extra.append(button("setting-language", `${say(shell, "language")} · ${language}`));
+      for (const row of controlRows(controlPrefs(), (key) => say(shell, key))) {
+        extra.append(button(row.id, row.label));
+      }
       page.append(extra);
     }
     if (!hdrAllowed(shell.settings)) {

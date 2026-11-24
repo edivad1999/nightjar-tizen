@@ -142,4 +142,16 @@ export class BrowserPeer implements MediaPeer {
     }
     return this.pc.getStats();
   }
+
+  controlOpen(): boolean {
+    return this.control?.readyState === "open";
+  }
+
+  gamepadOpen(): boolean {
+    return this.gamepad?.readyState === "open";
+  }
+
+  gamepadBufferedAmount(): number {
+    return this.gamepad?.bufferedAmount ?? 0;
+  }
 }
