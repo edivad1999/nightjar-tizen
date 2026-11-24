@@ -4,7 +4,6 @@ import { frameRateMaximum, hdrEnabled, probeHdr, probeTv, readVideoReceiverCapab
 import {
   BITRATES_KBPS,
   CODECS,
-  RESOLUTIONS,
   applySettings,
   codecsFor,
   fitAudio,
@@ -40,11 +39,12 @@ import {
 import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
 import { DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, stepWakePlay, type WakePlay } from "../protocol/wol.ts";
+import { openArtworkCache, type CachedApp } from "../storage/artwork-cache.ts";
 import { credentialsForDiscovery, bindStorage, loadPersisted, migrateLibraryKeys, readStored, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, wakesAutomatically, writeHostCredentials, writeStored, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { createLaunchTrace } from "./launch-debug.ts";
-import { activateFocused, addressDraft, disconnectCommand, initialShell, isLibraryControl, lastAppForHost, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
+import { activateFocused, addressDraft, cacheIds, disconnectCommand, initialShell, isLibraryControl, lastAppForHost, preferredCacheId, reduceShell, type LaunchChoice, type LibrarySort, type PairNotice, type SessionCommand, type Shell, type StartFailure, type TextSize } from "./model.ts";
 import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import { text } from "./strings.ts";
@@ -119,6 +119,52 @@ function booleanMap(value: unknown): Record<string, boolean> | null {
   return Object.fromEntries(entries);
 }
 
+function stringListMap(value: unknown): Record<string, string[]> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const result: Record<string, string[]> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!Array.isArray(item) || item.some((entry) => typeof entry !== "string")) {
+      return null;
+    }
+    result[key] = item;
+  }
+  return result;
+}
+
+function playedMap(value: unknown): Record<string, Record<string, number>> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const result: Record<string, Record<string, number>> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      return null;
+    }
+    const times: Record<string, number> = {};
+    for (const [appId, at] of Object.entries(item)) {
+      if (typeof at !== "number") {
+        return null;
+      }
+      times[appId] = at;
+    }
+    result[key] = times;
+  }
+  return result;
+}
+
+function failureOf(value: unknown): StartFailure | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const item = value as Record<string, unknown>;
+  if (typeof item.code !== "string" || typeof item.appId !== "string") {
+    return null;
+  }
+  return { code: item.code, message: typeof item.message === "string" ? item.message : "", appId: item.appId };
+}
+
 function loadLibrary(shell: Shell): Shell {
   const system = typeof navigator.language === "string" ? navigator.language : "en";
   try {
@@ -132,12 +178,27 @@ function loadLibrary(shell: Shell): Shell {
     }
     const record = parsed as Record<string, unknown>;
     const stored = record.locale === "it" || record.locale === "en" ? record.locale : null;
+    const sort: LibrarySort = record.sort === "last-played" ? "last-played" : "title";
+    const launch: LaunchChoice = record.launch === "last-game" ? "last-game" : "pcs";
+    const textSize: TextSize = record.textSize === "large" ? "large" : "regular";
     return {
       ...shell,
       locale: firstRunLocale(stored, system),
       launchDebug: record.launchDebug === false ? false : true,
+      sort,
+      launch,
+      textSize,
+      showHidden: record.showHidden === true,
+      sendLogs: record.sendLogs === true,
+      showOverlay: record.showOverlay === true,
+      reducedMotion: record.reducedMotion === true,
+      activeAddress: typeof record.activeAddress === "string" ? record.activeAddress : shell.activeAddress,
       lastAppByAddress: stringMap(record.lastAppByAddress) ?? shell.lastAppByAddress,
       quitOnDisconnect: booleanMap(record.quitOnDisconnect) ?? shell.quitOnDisconnect,
+      hidden: stringListMap(record.hidden) ?? shell.hidden,
+      favourites: stringListMap(record.favourites) ?? shell.favourites,
+      lastPlayed: playedMap(record.lastPlayed) ?? shell.lastPlayed,
+      startError: failureOf(record.startError),
     };
   } catch {
     return { ...shell, locale: firstRunLocale(null, system) };
@@ -237,8 +298,13 @@ let presentedFrames = 0;
 let presentedWatching = false;
 let streamingHealth = false;
 let readingStream = false;
-const health = createStreamHealth();
+const health = createStreamHealth({ sendLogs: shell.sendLogs });
+if (shell.showOverlay) {
+  health.togglePerformance();
+}
 const overlayNodes = mountStreamOverlay(document.body);
+const artworkCache = openArtworkCache();
+let artworkStamp = "";
 const launchTrace = createLaunchTrace();
 const launchPanel = mountLaunchPanel(document.body);
 const pendingLaunchLogs: string[] = [];
@@ -292,6 +358,18 @@ function persist(): void {
     writeStored(LIBRARY_KEY, JSON.stringify({
       locale: shell.locale,
       launchDebug: shell.launchDebug,
+      activeAddress: shell.activeAddress,
+      sort: shell.sort,
+      showHidden: shell.showHidden,
+      hidden: shell.hidden,
+      favourites: shell.favourites,
+      lastPlayed: shell.lastPlayed,
+      launch: shell.launch,
+      sendLogs: shell.sendLogs,
+      showOverlay: shell.showOverlay,
+      textSize: shell.textSize,
+      reducedMotion: shell.reducedMotion,
+      startError: shell.startError,
       lastAppByAddress: shell.lastAppByAddress,
       quitOnDisconnect: shell.quitOnDisconnect,
     }));
@@ -318,6 +396,7 @@ function releaseStreamInput(): void {
 }
 
 function paint(): void {
+  shell = reduceShell(shell, { kind: "arm-countdown" });
   const capture = streamCapturing();
   if (capturingInput && !capture) {
     releaseStreamInput();
@@ -327,8 +406,51 @@ function paint(): void {
   focusItems = render(appRoot, shell);
   applyLaunchPanel(launchPanel, launchTrace.text().join("\n"), launchPanelShown());
   const focus = focusItems.find((item) => item.id === shell.focusId) ?? focusItems[0];
-  if (focus) {
+  if (focus && !shell.reducedMotion) {
     document.getElementById(focus.id)?.focus();
+  } else if (focus) {
+    const node = document.getElementById(focus.id);
+    node?.focus({ preventScroll: true });
+  }
+  storeCovers();
+}
+
+function storeCovers(): void {
+  const hostId = preferredCacheId(shell);
+  const apps = hostId ? shell.catalogs[hostId] : undefined;
+  if (!hostId || !apps || apps.length === 0) {
+    return;
+  }
+  const stamp = JSON.stringify(apps.map((app) => [app.id, app.title, app.artwork?.length ?? 0]));
+  if (stamp === artworkStamp) {
+    return;
+  }
+  artworkStamp = stamp;
+  void artworkCache.write(hostId, apps);
+}
+
+async function loadCovers(): Promise<void> {
+  const ids = new Set<string>(cacheIds(shell));
+  for (const host of shell.hosts) {
+    ids.add(host.address);
+    if (host.macAddress) {
+      ids.add(host.macAddress);
+    }
+  }
+  let changed = false;
+  for (const hostId of ids) {
+    const apps: CachedApp[] = await artworkCache.read(hostId);
+    if (apps.length === 0) {
+      continue;
+    }
+    shell = reduceShell(shell, { kind: "catalog", hostId, apps });
+    changed = true;
+  }
+  if (changed && shell.launch === "last-game" && shell.activeAddress && shell.screen === "hosts" && !shell.launchSpent) {
+    shell = reduceShell(shell, { kind: "select-host", address: shell.activeAddress });
+  }
+  if (changed) {
+    paint();
   }
 }
 
@@ -692,9 +814,17 @@ function sendCommand(command: SessionCommand): void {
 }
 
 function commitLibrary(id: string): void {
+  const previousLogs = shell.sendLogs;
+  const previousOverlay = shell.showOverlay;
   const next = activateFocused(shell, id);
   const command = next.command;
   shell = command ? { ...next, command: null } : next;
+  if (shell.sendLogs !== previousLogs) {
+    health.setSendLogs(shell.sendLogs);
+  }
+  if (shell.showOverlay !== previousOverlay && health.performanceShown() !== shell.showOverlay) {
+    applyStreamView(overlayNodes, health.togglePerformance());
+  }
   paint();
   persist();
   if (command) {
@@ -777,8 +907,7 @@ function activate(id: string): void {
     return;
   }
   if (id === "setting-resolution") {
-    const next = cycle(RESOLUTIONS, RESOLUTIONS[1], (item) => item.width === shell.settings.width);
-    apply({ kind: "settings", patch: { width: next.width, height: next.height } });
+    apply({ kind: "cycle-setting", setting: "resolution" });
     return;
   }
   if (id === "setting-fps") {
@@ -813,15 +942,19 @@ function activate(id: string): void {
     return;
   }
   if (id === MENU_STATS_ID) {
-    const next = health.togglePerformance();
-    applyStreamView(overlayNodes, next);
-    setStreamOverlayVisible(healthOverlayVisible(shell.screen === "stream", next.performance.shown));
+    const view = health.togglePerformance();
+    shell = reduceShell(shell, { kind: "toggle-overlay" });
+    applyStreamView(overlayNodes, view);
+    setStreamOverlayVisible(healthOverlayVisible(shell.screen === "stream", view.performance.shown));
     paint();
+    persist();
     return;
   }
   if (id === MENU_LOGS_ID) {
     health.toggleSendLogs();
+    shell = reduceShell(shell, { kind: "toggle-send-logs" });
     paint();
+    persist();
     return;
   }
   if (id === "play-game" || id === "confirm-play") {
@@ -1445,6 +1578,16 @@ const migrated = migrateLibraryKeys(shell.hosts, shell.lastAppByAddress, shell.q
 shell = { ...shell, lastAppByAddress: migrated.lastAppByAddress, quitOnDisconnect: migrated.quitOnDisconnect };
 syncWatches();
 maybeDiscover();
+
+window.setInterval(() => {
+  if (platformPaused || !shell.countdown) {
+    return;
+  }
+  shell = reduceShell(shell, { kind: "tick-countdown" });
+  paint();
+}, 1000);
+
+void loadCovers();
 
 function onTvHidden(): void {
   platformPaused = true;

@@ -259,6 +259,41 @@ export function shellForShot(name: string): Shell | null {
     shell = reduceShell(shell, { kind: "remember-last", appId: "celeste" });
     return reduceShell(shell, { kind: "open-hosts" });
   }
+  if (name === "start-failed") {
+    return reduceShell(online(library), {
+      kind: "start-failed",
+      failure: { code: "unsupported-settings", message: "HEVC is not available", appId: "celeste" },
+    });
+  }
+  if (name === "countdown") {
+    let shell = online(library);
+    shell = reduceShell(shell, { kind: "remember-last", appId: "celeste" });
+    shell = { ...shell, launch: "last-game", launchSpent: false };
+    return reduceShell(shell, { kind: "arm-countdown" });
+  }
+  if (name === "library-asleep") {
+    let shell = reduceShell(initialShell(), {
+      kind: "hosts",
+      hosts: [host("Living room", "192.168.1.20", true, "02:00:00:00:00:0A")],
+    });
+    shell = reduceShell(shell, {
+      kind: "catalog",
+      hostId: "02:00:00:00:00:0A",
+      apps: library.map((app, index) => ({
+        id: app.id,
+        title: app.title,
+        artwork: null,
+        savedAt: index + 1,
+      })),
+    });
+    shell = reduceShell(shell, { kind: "select-host", address: "192.168.1.20" });
+    shell = reduceShell(shell, { kind: "open-game", appId: "hades" });
+    shell = reduceShell(shell, { kind: "toggle-favourite" });
+    shell = reduceShell(shell, { kind: "open-game", appId: "desktop" });
+    shell = reduceShell(shell, { kind: "toggle-hidden" });
+    shell = reduceShell(shell, { kind: "toggle-show-hidden" });
+    return reduceShell(shell, { kind: "open-library" });
+  }
   if (name === "help" || name === "help-it") {
     let shell = reduceShell(initialShell(), { kind: "open-help" });
     if (name === "help-it") {

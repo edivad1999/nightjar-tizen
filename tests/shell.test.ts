@@ -6,9 +6,11 @@ import { parseServerMessage, type AppEntry } from "../src/protocol/parse.ts";
 import { parsePersisted, upsertHosts, type SavedHost } from "../src/storage/persist.ts";
 import { keyboardReachable, keyDirection, moveFocus, type FocusItem } from "../src/ui/focus.ts";
 import { keyAction } from "../src/ui/keys.ts";
-import { activateFocused, hostStatus, initialShell, reduceShell, type Shell } from "../src/ui/model.ts";
-import { text } from "../src/ui/strings.ts";
-import { focusMap } from "../src/ui/view.ts";
+import { evictCovers, memoryArtworkCache, type CachedApp } from "../src/storage/artwork-cache.ts";
+import { resolutionChoices, type VideoMode } from "../src/domain/settings.ts";
+import { activateFocused, hostStatus, initialShell, libraryLists, reduceShell, type Shell } from "../src/ui/model.ts";
+import { stringKeys, text, type StringKey } from "../src/ui/strings.ts";
+import { focusMap, render } from "../src/ui/view.ts";
 
 const context: StepContext = { clientName: "Nightjar TV", nextPin: () => "0000" };
 
@@ -311,3 +313,415 @@ test("illegal hdr is cleared by the shell settings reducer", () => {
   assert.equal(shell.settings.hdr, false);
   assert.deepEqual(shell.toast, { kind: "hidden" });
 });
+
+const modes: VideoMode[] = [
+  {
+    width: 1920,
+    height: 1080,
+    frameRates: [60],
+    codecs: ["hevc"],
+    hdrCodecs: [],
+    defaultCodec: "hevc",
+    defaultBitrateKbps: 20000,
+    experimental: false,
+    hdrSupported: false,
+    hdrExperimental: false,
+  },
+  {
+    width: 3840,
+    height: 2160,
+    frameRates: [30, 60],
+    codecs: ["hevc"],
+    hdrCodecs: ["hevc"],
+    defaultCodec: "hevc",
+    defaultBitrateKbps: 80000,
+    experimental: true,
+    hdrSupported: true,
+    hdrExperimental: true,
+  },
+];
+
+function withModes(shell: Shell): Shell {
+  const link = shell.link;
+  if (link.phase.kind !== "online") {
+    return shell;
+  }
+  return reduceShell(shell, {
+    kind: "link",
+    link: {
+      ...link,
+      phase: { kind: "online", snapshot: { ...link.phase.snapshot, modes } },
+    },
+  });
+}
+
+test("a start error renders the reason and try again sends start-session", () => {
+  let shell = withApps([
+    app("celeste", "Celeste", false),
+    app("hades", "Hades", false),
+  ], null);
+  shell = reduceShell(shell, {
+    kind: "start-failed",
+    failure: { code: "sunshine-unavailable", message: "down", appId: "hades" },
+  });
+  const root = installDocument();
+  render(root as unknown as HTMLElement, shell);
+  assert.match(root.textContent ?? "", /The PC's stream service is not available/);
+  assert.match(root.textContent ?? "", /Try again/);
+  assert.match(root.textContent ?? "", /1920 × 1080/);
+  shell = activateFocused(shell, "start-retry");
+  assert.deepEqual(shell.command, { kind: "start-session", appId: "hades" });
+  assert.equal(shell.startError, null);
+
+  const online = withApps(library, null);
+  const phase = online.link.phase;
+  if (phase.kind !== "online") {
+    throw new Error("expected an online PC");
+  }
+  const snapshot = {
+    ...phase.snapshot,
+    lastStartError: { code: "connection-failed", message: "ice failed", appId: "celeste" },
+  };
+  const reported = reduceShell(online, {
+    kind: "link",
+    link: {
+      ...online.link,
+      phase: {
+        kind: "online",
+        snapshot,
+      },
+    },
+  });
+  assert.equal(reported.startError?.code, "connection-failed");
+  assert.equal(reported.startError?.appId, "celeste");
+});
+
+test("hidden games disappear until show hidden is on", () => {
+  let shell = withApps(library, null);
+  shell = reduceShell(shell, { kind: "open-game", appId: "desktop" });
+  shell = reduceShell(shell, { kind: "toggle-hidden" });
+  shell = reduceShell(shell, { kind: "open-library" });
+  assert.equal(libraryLists(shell).games.some((app) => app.id === "desktop"), false);
+  assert.equal(libraryLists(shell).hiddenCount, 1);
+  shell = activateFocused(shell, "library-hidden");
+  assert.equal(shell.showHidden, true);
+  assert.equal(libraryLists(shell).games.some((app) => app.id === "desktop"), true);
+  shell = reduceShell(shell, { kind: "open-game", appId: "desktop" });
+  shell = activateFocused(shell, "hide-game");
+  assert.equal(libraryLists(shell).hiddenCount, 0);
+});
+
+test("sort by last played orders the library", () => {
+  let shell = withApps(library, null);
+  shell = reduceShell(shell, { kind: "note-played", appId: "hades", at: 300 });
+  shell = reduceShell(shell, { kind: "note-played", appId: "desktop", at: 100 });
+  shell = reduceShell(shell, { kind: "toggle-sort" });
+  assert.equal(shell.sort, "last-played");
+  assert.deepEqual(libraryLists(shell).games.map((app) => app.id), ["hades", "desktop", "celeste"]);
+  shell = reduceShell(shell, { kind: "open-game", appId: "celeste" });
+  shell = reduceShell(shell, { kind: "toggle-favourite" });
+  shell = reduceShell(shell, { kind: "open-library" });
+  assert.deepEqual(libraryLists(shell).favourites.map((app) => app.id), ["celeste"]);
+  assert.equal(libraryLists(shell).games.some((app) => app.id === "celeste"), false);
+});
+
+test("the countdown can be cancelled and is skipped after a failure", () => {
+  const quiet = [
+    app("celeste", "Celeste", false),
+    app("hades", "Hades", false),
+    app("desktop", "Desktop", false),
+  ];
+  let shell = withApps(quiet, null);
+  shell = reduceShell(shell, { kind: "remember-last", appId: "hades" });
+  shell = { ...shell, launch: "last-game", launchSpent: false };
+  shell = reduceShell(shell, { kind: "arm-countdown" });
+  assert.equal(shell.countdown?.appId, "hades");
+  assert.equal(shell.countdown?.seconds, 3);
+  shell = activateFocused(shell, "countdown-cancel");
+  assert.equal(shell.countdown, null);
+  shell = reduceShell(shell, { kind: "arm-countdown" });
+  assert.equal(shell.countdown, null);
+
+  let opening = withApps(quiet, null);
+  opening = reduceShell(opening, { kind: "remember-last", appId: "hades" });
+  opening = { ...opening, launch: "last-game", launchSpent: false };
+  opening = reduceShell(opening, { kind: "arm-countdown" });
+  opening = reduceShell(opening, { kind: "tick-countdown" });
+  opening = reduceShell(opening, { kind: "tick-countdown" });
+  opening = reduceShell(opening, { kind: "tick-countdown" });
+  assert.equal(opening.screen, "game");
+  assert.equal(opening.selectedAppId, "hades");
+  assert.equal(opening.countdown, null);
+
+  let failed = withApps(quiet, null);
+  failed = reduceShell(failed, { kind: "remember-last", appId: "hades" });
+  failed = {
+    ...failed,
+    launch: "last-game",
+    launchSpent: false,
+    startError: { code: "internal-error", message: "boom", appId: "hades" },
+  };
+  failed = reduceShell(failed, { kind: "arm-countdown" });
+  assert.equal(failed.countdown, null);
+  assert.equal(failed.launchSpent, true);
+});
+
+test("the resolution list equals the host modes and bitrate follows the mode", () => {
+  assert.deepEqual(resolutionChoices(modes).map((mode) => `${mode.width}x${mode.height}`), ["1920x1080", "3840x2160"]);
+  assert.equal(resolutionChoices(modes)[1]?.experimental, true);
+  assert.equal(resolutionChoices(modes)[1]?.hdrExperimental, true);
+  let shell = withModes(withApps(library, null));
+  assert.equal(shell.settings.width, 1920);
+  shell = reduceShell(shell, { kind: "open-settings" });
+  shell = activateFocused(shell, "setting-resolution");
+  assert.equal(shell.settings.width, 3840);
+  assert.equal(shell.settings.height, 2160);
+  assert.equal(shell.settings.bitrateKbps, 80000);
+  const root = installDocument();
+  render(root as unknown as HTMLElement, shell);
+  assert.equal(root.querySelector("main")?.dataset.resolutions, "1920x1080,3840x2160");
+});
+
+test("cached covers render without a socket", async () => {
+  const cache = memoryArtworkCache();
+  const artwork = "data:image/png;base64,AAAA";
+  const apps: CachedApp[] = [{ id: "celeste", title: "Celeste", artwork, savedAt: 5 }];
+  await cache.write("192.168.1.20", apps);
+  const loaded = await cache.read("192.168.1.20");
+  assert.equal(loaded[0]?.artwork, artwork);
+  let shell = reduceShell(initialShell(), { kind: "hosts", hosts: [saved("192.168.1.20", true)] });
+  shell = reduceShell(shell, { kind: "catalog", hostId: "192.168.1.20", apps: loaded });
+  shell = reduceShell(shell, { kind: "select-host", address: "192.168.1.20" });
+  assert.equal(shell.link.phase.kind, "idle");
+  assert.equal(shell.screen, "library");
+  const root = installDocument();
+  render(root as unknown as HTMLElement, shell);
+  const image = root.querySelector("img");
+  assert.equal(image?.getAttribute("src") ?? image?.src, artwork);
+  assert.match(root.textContent ?? "", /This PC is asleep/);
+  const kept = evictCovers([
+    { hostId: "h", id: "old", title: "Old", artwork: "abcd", savedAt: 1, bytes: 4 },
+    { hostId: "h", id: "new", title: "New", artwork: "abcdefgh", savedAt: 2, bytes: 8 },
+  ], 8);
+  assert.deepEqual(kept.map((row) => row.id), ["new"]);
+});
+
+const SAME_IN_BOTH = new Set<StringKey>([
+  "wordmark",
+  "pcs",
+  "surround",
+  "audioStereo",
+  "audio51",
+  "audio71",
+  "bitrate",
+  "streamLine",
+  "addressPlaceholder",
+  "keypadLetters",
+  "keypadDigits",
+  "countdownSeconds",
+  "overlayStream",
+  "overlayFps",
+  "overlayCodec",
+  "overlayBitrate",
+  "overlayHdr",
+  "overlayGamepad",
+  "english",
+  "italian",
+]);
+
+test("Italian has no untranslated strings", () => {
+  const missing: string[] = [];
+  for (const key of stringKeys()) {
+    const italian = text("it", key);
+    assert.ok(italian.length > 0, key);
+    if (!SAME_IN_BOTH.has(key) && italian === text("en", key)) {
+      missing.push(key);
+    }
+  }
+  assert.deepEqual(missing, []);
+
+  const screens: Shell[] = [];
+  let library = withApps([
+    app("celeste", "Celeste", true),
+    app("hades", "Hades", false),
+  ], "celeste");
+  library = reduceShell(library, { kind: "toggle-locale" });
+  library = reduceShell(library, { kind: "toggle-sort" });
+  screens.push(library);
+  screens.push(reduceShell(library, { kind: "open-game", appId: "hades" }));
+  let settings = reduceShell(withModes(library), { kind: "open-settings" });
+  settings = reduceShell(settings, { kind: "toggle-more" });
+  screens.push(settings);
+  let stream = withApps([app("celeste", "Celeste", true)], "celeste");
+  stream = reduceShell(stream, { kind: "toggle-locale" });
+  const phase = stream.link.phase;
+  if (phase.kind !== "online") {
+    throw new Error("expected a stream");
+  }
+  stream = reduceShell(stream, {
+    kind: "link",
+    link: {
+      ...stream.link,
+      phase: {
+        kind: "online",
+        snapshot: {
+          ...phase.snapshot,
+          stream: { kind: "live", appId: "celeste", state: "streaming", sessionId: 2 },
+        },
+      },
+    },
+  });
+  stream = reduceShell(stream, { kind: "back" });
+  screens.push(stream);
+  screens.push(reduceShell(library, {
+    kind: "start-failed",
+    failure: { code: "unsupported-settings", message: "no", appId: "hades" },
+  }));
+  let countdown = reduceShell(library, { kind: "remember-last", appId: "hades" });
+  countdown = { ...countdown, launch: "last-game", launchSpent: false, locale: "it" };
+  screens.push(reduceShell(countdown, { kind: "arm-countdown" }));
+
+  const root = installDocument();
+  let blob = "";
+  for (const shell of screens) {
+    render(root as unknown as HTMLElement, shell);
+    blob += `\n${root.textContent ?? ""}`;
+  }
+  const leaked: string[] = [];
+  for (const key of stringKeys()) {
+    const english = text("en", key);
+    const italian = text("it", key);
+    if (english === italian || english.length < 8 || italian.includes(english)) {
+      continue;
+    }
+    if (blob.includes(english)) {
+      leaked.push(`${key}: ${english}`);
+    }
+  }
+  assert.deepEqual(leaked, []);
+});
+
+class FakeElement {
+  readonly tag: string;
+  className = "";
+  type = "";
+  tabIndex = 0;
+  hidden = false;
+  disabled = false;
+  role = "";
+  alt = "";
+  src = "";
+  dataset: Record<string, string> = {};
+  children: FakeElement[] = [];
+  parent: FakeElement | null = null;
+  private label: string | null = null;
+  private idValue = "";
+  lang = "";
+
+  constructor(tag: string) {
+    this.tag = tag;
+  }
+
+  get id(): string {
+    return this.idValue;
+  }
+
+  set id(value: string) {
+    this.idValue = value;
+    if (value) {
+      ids.set(value, this);
+    }
+  }
+
+  set textContent(value: string) {
+    this.label = value;
+    this.children = [];
+  }
+
+  get textContent(): string {
+    if (this.children.length === 0) {
+      return this.label ?? "";
+    }
+    return this.children.map((child) => child.textContent).join("");
+  }
+
+  append(...nodes: Array<FakeElement | string>): void {
+    this.label = null;
+    for (const node of nodes) {
+      if (typeof node === "string") {
+        const text = new FakeElement("#text");
+        text.textContent = node;
+        text.parent = this;
+        this.children.push(text);
+      } else {
+        node.parent = this;
+        this.children.push(node);
+      }
+    }
+  }
+
+  replaceChildren(...nodes: FakeElement[]): void {
+    this.label = null;
+    this.children = nodes;
+    for (const node of nodes) {
+      node.parent = this;
+    }
+  }
+
+  setAttribute(name: string, value: string): void {
+    if (name === "src") {
+      this.src = value;
+    }
+  }
+
+  getAttribute(name: string): string | null {
+    if (name === "src") {
+      return this.src;
+    }
+    return null;
+  }
+
+  focus(_options?: { preventScroll?: boolean }): void {}
+
+  scrollIntoView(_options?: { block?: string }): void {}
+
+  querySelector(selector: string): FakeElement | null {
+    if (selector.startsWith("#") && this.id === selector.slice(1)) {
+      return this;
+    }
+    if (this.tag === selector) {
+      return this;
+    }
+    for (const child of this.children) {
+      const found = child.querySelector(selector);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+}
+
+const ids = new Map<string, FakeElement>();
+
+function installDocument(): FakeElement {
+  ids.clear();
+  const root = new FakeElement("div");
+  const documentElement = new FakeElement("html");
+  const documentFake = {
+    documentElement,
+    createElement(tag: string) {
+      return new FakeElement(tag);
+    },
+    createTextNode(value: string) {
+      const node = new FakeElement("#text");
+      node.textContent = value;
+      return node;
+    },
+    getElementById(id: string) {
+      return ids.get(id) ?? null;
+    },
+  };
+  Object.assign(globalThis, { document: documentFake });
+  return root as unknown as FakeElement;
+}

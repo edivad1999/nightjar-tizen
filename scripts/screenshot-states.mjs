@@ -103,6 +103,9 @@ const framed = [
   "wake-play",
   "help",
   "help-it",
+  "start-failed",
+  "countdown",
+  "library-asleep",
 ];
 
 try {

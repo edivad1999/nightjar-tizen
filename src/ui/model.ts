@@ -1,18 +1,50 @@
 import { hostKey, parseTypedEndpoint } from "../domain/ids.ts";
-import { applySettings, BITRATES_KBPS, DEFAULT_SETTINGS, FRAME_RATES, RESOLUTIONS, settingsRejection, type StreamSettings } from "../domain/settings.ts";
-import { initialLink, type LinkState } from "../protocol/machine.ts";
+import {
+  applySettings,
+  BITRATES_KBPS,
+  codecsFor,
+  DEFAULT_SETTINGS,
+  frameRatesFor,
+  modeLabel,
+  resolutionChoices,
+  settingsRejection,
+  type StreamSettings,
+  type VideoMode,
+} from "../domain/settings.ts";
+import { initialLink, type HostSnapshot, type LinkState } from "../protocol/machine.ts";
+import type { AppEntry } from "../protocol/parse.ts";
+import type { CachedApp } from "../storage/artwork-cache.ts";
 import { updateHost, upsertHosts, wakesAutomatically, type SavedHost } from "../storage/persist.ts";
-import type { Locale } from "./strings.ts";
+import type { Locale, StringKey } from "./strings.ts";
 
 export type AppScreen = "hosts" | "add" | "discover" | "pair" | "help" | "library" | "game" | "settings" | "stream";
 
 export type Toast =
   | { kind: "hidden" }
-  | { kind: "info"; text: string }
-  | { kind: "error"; text: string }
+  | { kind: "info"; text: string; key?: StringKey }
+  | { kind: "error"; text: string; key?: StringKey }
   | { kind: "waking"; name: string }
   | { kind: "wake-missing" }
   | { kind: "wake-unavailable" };
+
+export type LibrarySort = "title" | "last-played";
+
+export type LaunchChoice = "pcs" | "last-game";
+
+export type TextSize = "regular" | "large";
+
+export type Countdown = { appId: string; seconds: number };
+
+/**
+ * G1 records a failed start as `lastStartError` on the online snapshot or on
+ * `LinkState`: `{ code, message, appId }`. The shell copies that value.
+ * `start-failed` is the same shape for tests and for the UI until G1 lands.
+ */
+export type StartFailure = {
+  code: string;
+  message: string;
+  appId: string;
+};
 
 export type AddressBoard = "digits" | "letters";
 
@@ -73,6 +105,20 @@ export type Shell = {
   launchDebug: boolean;
   playbackBlocked: boolean;
   presence: Record<string, boolean>;
+  sort: LibrarySort;
+  showHidden: boolean;
+  hidden: Record<string, string[]>;
+  favourites: Record<string, string[]>;
+  lastPlayed: Record<string, Record<string, number>>;
+  catalogs: Record<string, CachedApp[]>;
+  launch: LaunchChoice;
+  sendLogs: boolean;
+  showOverlay: boolean;
+  textSize: TextSize;
+  reducedMotion: boolean;
+  launchSpent: boolean;
+  countdown: Countdown | null;
+  startError: StartFailure | null;
 };
 
 export type ShellAction =
@@ -118,7 +164,25 @@ export type ShellAction =
   | { kind: "disconnect" }
   | { kind: "quit-host" }
   | { kind: "consume-command" }
-  | { kind: "cycle-setting"; setting: "resolution" | "fps" | "bitrate" };
+  | { kind: "cycle-setting"; setting: "resolution" | "bitrate" }
+  | { kind: "toggle-sort" }
+  | { kind: "toggle-show-hidden" }
+  | { kind: "toggle-hidden" }
+  | { kind: "toggle-favourite" }
+  | { kind: "toggle-send-logs" }
+  | { kind: "toggle-overlay" }
+  | { kind: "toggle-text-size" }
+  | { kind: "toggle-motion" }
+  | { kind: "toggle-launch" }
+  | { kind: "restore-defaults" }
+  | { kind: "note-played"; appId: string; at: number }
+  | { kind: "catalog"; hostId: string; apps: CachedApp[] }
+  | { kind: "start-failed"; failure: StartFailure }
+  | { kind: "dismiss-start" }
+  | { kind: "retry-start" }
+  | { kind: "arm-countdown" }
+  | { kind: "tick-countdown" }
+  | { kind: "cancel-countdown" };
 
 export function initialShell(): Shell {
   return {
@@ -141,12 +205,25 @@ export function initialShell(): Shell {
     launchDebug: true,
     playbackBlocked: false,
     presence: {},
+    sort: "title",
+    showHidden: false,
+    hidden: {},
+    favourites: {},
+    lastPlayed: {},
+    catalogs: {},
+    launch: "pcs",
+    sendLogs: false,
+    showOverlay: false,
+    textSize: "regular",
+    reducedMotion: false,
+    launchSpent: false,
+    countdown: null,
+    startError: null,
   };
 }
 
 export function resolutionLabel(video: StreamSettings): string {
-  const match = RESOLUTIONS.find((item) => item.width === video.width && item.height === video.height);
-  return match ? match.label : `${video.width}x${video.height}`;
+  return modeLabel(video.width, video.height);
 }
 
 export function hostStatus(shell: Shell, host: SavedHost): HostPresence {
@@ -169,6 +246,171 @@ export function hostStatus(shell: Shell, host: SavedHost): HostPresence {
 
 export function snapshotOf(shell: Shell) {
   return shell.link.phase.kind === "online" ? shell.link.phase.snapshot : null;
+}
+
+export function cacheIds(shell: Shell): string[] {
+  const host = shell.hosts.find((item) => item.address === shell.activeAddress);
+  const ids = [host?.macAddress, shell.activeAddress].filter((id): id is string => typeof id === "string" && id.length > 0);
+  return [...new Set(ids)];
+}
+
+export function preferredCacheId(shell: Shell): string | null {
+  return cacheIds(shell)[0] ?? null;
+}
+
+function catalogApps(shell: Shell): CachedApp[] {
+  for (const id of cacheIds(shell)) {
+    const rows = shell.catalogs[id];
+    if (rows && rows.length > 0) {
+      return rows;
+    }
+  }
+  return [];
+}
+
+export function appsFor(shell: Shell): AppEntry[] {
+  const snapshot = snapshotOf(shell);
+  if (snapshot) {
+    return snapshot.apps;
+  }
+  return catalogApps(shell).map((app) => ({
+    id: app.id,
+    title: app.title,
+    artworkAvailable: app.artwork !== null,
+    running: false,
+  }));
+}
+
+export function artworkFor(shell: Shell, appId: string): string | null {
+  const snapshot = snapshotOf(shell);
+  const live = snapshot?.artwork[appId];
+  if (live) {
+    return live;
+  }
+  for (const id of cacheIds(shell)) {
+    const found = shell.catalogs[id]?.find((app) => app.id === appId)?.artwork;
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
+export function libraryLists(shell: Shell): { favourites: AppEntry[]; games: AppEntry[]; hiddenCount: number } {
+  const hostId = preferredCacheId(shell);
+  const hidden = new Set(hostId ? shell.hidden[hostId] ?? [] : []);
+  const favs = new Set(hostId ? shell.favourites[hostId] ?? [] : []);
+  const played = hostId ? shell.lastPlayed[hostId] ?? {} : {};
+  const visible = appsFor(shell).filter((app) => shell.showHidden || !hidden.has(app.id));
+  const sorted = [...visible].sort((left, right) => compareApps(left, right, shell.sort, played));
+  return {
+    favourites: sorted.filter((app) => favs.has(app.id)),
+    games: sorted.filter((app) => !favs.has(app.id)),
+    hiddenCount: appsFor(shell).filter((app) => hidden.has(app.id)).length,
+  };
+}
+
+function compareApps(left: AppEntry, right: AppEntry, sort: LibrarySort, played: Record<string, number>): number {
+  if (sort === "last-played") {
+    const delta = (played[right.id] ?? 0) - (played[left.id] ?? 0);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+  return left.title.localeCompare(right.title);
+}
+
+export function appIsHidden(shell: Shell, appId: string | null): boolean {
+  const hostId = preferredCacheId(shell);
+  if (!hostId || !appId) {
+    return false;
+  }
+  return (shell.hidden[hostId] ?? []).includes(appId);
+}
+
+export function appIsFavourite(shell: Shell, appId: string | null): boolean {
+  const hostId = preferredCacheId(shell);
+  if (!hostId || !appId) {
+    return false;
+  }
+  return (shell.favourites[hostId] ?? []).includes(appId);
+}
+
+function toggleMembership(map: Record<string, string[]>, hostId: string, appId: string): Record<string, string[]> {
+  const current = new Set(map[hostId] ?? []);
+  if (current.has(appId)) {
+    current.delete(appId);
+  } else {
+    current.add(appId);
+  }
+  return { ...map, [hostId]: [...current] };
+}
+
+function rememberCatalog(shell: Shell, snapshot: HostSnapshot): Record<string, CachedApp[]> {
+  const ids = cacheIds(shell);
+  if (ids.length === 0 || snapshot.apps.length === 0) {
+    return shell.catalogs;
+  }
+  const previous = catalogApps(shell);
+  const savedAt = Date.now();
+  const apps = snapshot.apps.map((app) => ({
+    id: app.id,
+    title: app.title,
+    artwork: snapshot.artwork[app.id] ?? previous.find((item) => item.id === app.id)?.artwork ?? null,
+    savedAt,
+  }));
+  const catalogs = { ...shell.catalogs };
+  for (const id of ids) {
+    catalogs[id] = apps;
+  }
+  return catalogs;
+}
+
+function normalizeFailure(raw: unknown): StartFailure | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const item = raw as Record<string, unknown>;
+  if (typeof item.code !== "string" || typeof item.appId !== "string" || item.appId.length === 0) {
+    return null;
+  }
+  return {
+    code: item.code,
+    message: typeof item.message === "string" ? item.message : "",
+    appId: item.appId,
+  };
+}
+
+export function takeStartFailure(link: LinkState): StartFailure | null | undefined {
+  if (link.phase.kind !== "online") {
+    return undefined;
+  }
+  return normalizeFailure(link.phase.snapshot.lastStartError);
+}
+
+export function startFailureKey(code: string): StringKey {
+  switch (code) {
+    case "unsupported-settings":
+      return "startUnsupported";
+    case "session-active":
+      return "startSessionActive";
+    case "host-operation-active":
+      return "startHostBusy";
+    case "invalid-application":
+      return "startInvalidApp";
+    case "sunshine-unavailable":
+      return "startSunshine";
+    case "internal-error":
+      return "startInternal";
+    case "connection-failed":
+      return "startConnection";
+    case "reconnect-timeout":
+      return "startReconnect";
+    case "media":
+      return "startMedia";
+    default:
+      return "startUnknown";
+  }
 }
 
 export function streamingAppId(shell: Shell): string | null {
@@ -200,13 +442,13 @@ export function lastAppId(shell: Shell): string | null {
 }
 
 export function continueAppId(shell: Shell): string | null {
-  const snapshot = snapshotOf(shell);
+  const apps = appsFor(shell);
   const running = runningAppId(shell);
-  if (running && snapshot?.apps.some((app) => app.id === running)) {
+  if (running && apps.some((app) => app.id === running)) {
     return running;
   }
   const last = lastAppId(shell);
-  if (last && snapshot?.apps.some((app) => app.id === last)) {
+  if (last && apps.some((app) => app.id === last)) {
     return last;
   }
   return null;
@@ -252,14 +494,26 @@ function remember(shell: Shell, appId: string): Record<string, string> {
   return { ...shell.lastAppByAddress, [key]: appId };
 }
 
+function stampPlayed(shell: Shell, appId: string, at = Date.now()): Record<string, Record<string, number>> {
+  const hostId = preferredCacheId(shell);
+  if (!hostId) {
+    return shell.lastPlayed;
+  }
+  const current = shell.lastPlayed[hostId] ?? {};
+  return { ...shell.lastPlayed, [hostId]: { ...current, [appId]: at } };
+}
+
 function withCommand(shell: Shell, appId: string, command: SessionCommand): Shell {
   return {
     ...shell,
     confirmAppId: null,
     command,
     lastAppByAddress: remember(shell, appId),
+    lastPlayed: stampPlayed(shell, appId),
     selectedAppId: appId,
     toast: { kind: "hidden" },
+    startError: null,
+    countdown: null,
   };
 }
 
@@ -588,9 +842,34 @@ function saveAddress(shell: Shell): Shell {
   };
 }
 
+function cycleResolution(shell: Shell): Shell {
+  const modes = snapshotOf(shell)?.modes ?? null;
+  const choices = resolutionChoices(modes);
+  const first = choices[0];
+  if (!first) {
+    return shell;
+  }
+  const next = cycleValue(choices, first, (item) => item.width === shell.settings.width && item.height === shell.settings.height);
+  const mode: VideoMode | null = modes?.find((item) => item.width === next.width && item.height === next.height) ?? null;
+  const extensions = snapshotOf(shell)?.extensions ?? null;
+  const codec = mode && !codecsFor(mode, extensions, true).includes(shell.settings.codec) ? mode.defaultCodec : shell.settings.codec;
+  const rates = frameRatesFor(mode, codec, extensions);
+  const fps = rates.includes(shell.settings.fps) ? shell.settings.fps : (rates[rates.length - 1] ?? shell.settings.fps);
+  return reduceShell(shell, {
+    kind: "settings",
+    patch: { width: next.width, height: next.height, bitrateKbps: next.bitrateKbps, fps, codec },
+  });
+}
+
 export function reduceShell(shell: Shell, action: ShellAction): Shell {
   switch (action.kind) {
     case "back": {
+      if (shell.countdown) {
+        return { ...shell, countdown: null, launchSpent: true, focusId: "continue-last" };
+      }
+      if (shell.startError) {
+        return { ...shell, startError: null, launchSpent: true, focusId: shell.screen === "game" ? "play-game" : "continue-last" };
+      }
       if (shell.screen === "stream" && shell.menuOpen) {
         return { ...shell, menuOpen: false };
       }
@@ -640,6 +919,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         screen: "add",
         focusId: "key-1",
         confirmAppId: null,
+        launchSpent: true,
         association: { kind: "address", draft: "", board: "digits", problem: "none", editing: null, field: "address" },
       };
     case "address-key":
@@ -696,6 +976,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         focusId: "help-done",
         confirmAppId: null,
         menuOpen: false,
+        launchSpent: true,
         association: { kind: "help", returnTo: shell.screen },
       };
     case "ask-forget":
@@ -729,6 +1010,13 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         settings: shell.settings,
         locale: shell.locale,
         launchDebug: shell.launchDebug,
+        sort: shell.sort,
+        showHidden: shell.showHidden,
+        launch: shell.launch,
+        sendLogs: shell.sendLogs,
+        showOverlay: shell.showOverlay,
+        textSize: shell.textSize,
+        reducedMotion: shell.reducedMotion,
       };
     case "presence":
       if (shell.presence[action.id] === action.online) {
@@ -752,18 +1040,18 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.link.phase.kind !== "online" || shell.association.kind !== "pair" || shell.association.view.kind !== "paired") {
         return shell;
       }
-      return { ...shell, screen: "library", association: { kind: "browse" }, menuOpen: false, focusId: "continue-last" };
+      return { ...shell, screen: "library", association: { kind: "browse" }, menuOpen: false, focusId: "continue-last", launchSpent: true };
     case "open-settings":
-      return { ...shell, screen: "settings", menuOpen: false, focusId: "setting-resolution", confirmAppId: null };
+      return { ...shell, screen: "settings", menuOpen: false, focusId: "setting-resolution", confirmAppId: null, launchSpent: true };
     case "open-hosts":
-      return { ...shell, screen: "hosts", menuOpen: false, focusId: "add-host", confirmAppId: null, association: { kind: "browse" } };
+      return { ...shell, screen: "hosts", menuOpen: false, focusId: "add-host", confirmAppId: null, association: { kind: "browse" }, launchSpent: true };
     case "open-library":
-      if (shell.link.phase.kind !== "online") {
+      if (shell.link.phase.kind !== "online" && appsFor(shell).length === 0) {
         return shell;
       }
-      return { ...shell, screen: "library", menuOpen: false, confirmAppId: null, focusId: "continue-last" };
+      return { ...shell, screen: "library", menuOpen: false, confirmAppId: null, focusId: "continue-last", launchSpent: true };
     case "open-game": {
-      const known = snapshotOf(shell)?.apps.some((app) => app.id === action.appId);
+      const known = appsFor(shell).some((app) => app.id === action.appId);
       if (!known) {
         return shell;
       }
@@ -775,6 +1063,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         command: null,
         menuOpen: false,
         focusId: "play-game",
+        launchSpent: true,
       };
     }
     case "focus":
@@ -788,7 +1077,11 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       const entry = shell.association.kind === "address" || shell.association.kind === "discover"
         ? { kind: "browse" as const }
         : shell.association;
-      return { ...shell, activeAddress: action.address, confirmAppId: null, selectedAppId: null, association: entry };
+      const next: Shell = { ...shell, activeAddress: action.address, confirmAppId: null, selectedAppId: null, association: entry };
+      if (next.link.phase.kind !== "online" && appsFor(next).length > 0) {
+        return { ...next, screen: "library", focusId: "continue-last" };
+      }
+      return next;
     }
     case "settings": {
       const settings = applySettings(shell.settings, action.patch);
@@ -804,13 +1097,32 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       const screen = screenFor(shell.screen, action.link, association);
       const menuOpen = screen === "stream" ? shell.menuOpen : false;
       const toast = toastForLink(action.link);
+      const taken = takeStartFailure(action.link);
+      const live = action.link.phase.kind === "online" && action.link.phase.snapshot.stream.kind === "live";
+      const startError = live ? null : taken === undefined ? shell.startError : taken;
+      const catalogs = action.link.phase.kind === "online" ? rememberCatalog(shell, action.link.phase.snapshot) : shell.catalogs;
       const enteredPair = screen === "pair" && (shell.screen !== "pair" || shell.association.kind !== "pair" || (association.kind === "pair" && shell.association.kind === "pair" && shell.association.view.kind !== association.view.kind));
-      const focusId = screen === "library" && shell.screen !== "library"
-        ? "continue-last"
-        : enteredPair && association.kind === "pair"
-          ? pairFocus(association.view)
-          : shell.focusId;
-      return { ...shell, hosts: adoptOnlineName(shell.hosts, shell.activeAddress, action.link), link: action.link, screen, menuOpen, toast, association, focusId };
+      const sameFailure = shell.startError?.code === startError?.code && shell.startError?.appId === startError?.appId;
+      const focusId = startError && !sameFailure
+        ? "start-retry"
+        : screen === "library" && shell.screen !== "library"
+          ? "continue-last"
+          : enteredPair && association.kind === "pair"
+            ? pairFocus(association.view)
+            : shell.focusId;
+      return {
+        ...shell,
+        hosts: adoptOnlineName(shell.hosts, shell.activeAddress, action.link),
+        link: action.link,
+        screen,
+        menuOpen,
+        toast,
+        association,
+        focusId,
+        catalogs,
+        startError,
+        countdown: startError ? null : shell.countdown,
+      };
     }
     case "toast":
       return { ...shell, toast: action.toast };
@@ -849,17 +1161,102 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       return { ...shell, command: null };
     case "cycle-setting": {
       if (action.setting === "resolution") {
-        const next = cycleValue(RESOLUTIONS, RESOLUTIONS[1], (item) => item.width === shell.settings.width);
-        return reduceShell(shell, { kind: "settings", patch: { width: next.width, height: next.height } });
-      }
-      if (action.setting === "fps") {
-        const next = cycleValue(FRAME_RATES, shell.settings.fps, (item) => item === shell.settings.fps);
-        return reduceShell(shell, { kind: "settings", patch: { fps: next } });
+        return cycleResolution(shell);
       }
       const bitrates: readonly number[] = BITRATES_KBPS;
       const next = cycleValue(bitrates, shell.settings.bitrateKbps, (item) => item === shell.settings.bitrateKbps);
       return reduceShell(shell, { kind: "settings", patch: { bitrateKbps: next } });
     }
+    case "toggle-sort":
+      return { ...shell, sort: shell.sort === "title" ? "last-played" : "title" };
+    case "toggle-show-hidden":
+      return { ...shell, showHidden: !shell.showHidden, focusId: "library-hidden" };
+    case "toggle-hidden":
+    case "toggle-favourite": {
+      const appId = shell.selectedAppId;
+      const hostId = preferredCacheId(shell);
+      if (!appId || !hostId) {
+        return shell;
+      }
+      if (action.kind === "toggle-hidden") {
+        return { ...shell, hidden: toggleMembership(shell.hidden, hostId, appId) };
+      }
+      return { ...shell, favourites: toggleMembership(shell.favourites, hostId, appId) };
+    }
+    case "toggle-send-logs":
+      return { ...shell, sendLogs: !shell.sendLogs };
+    case "toggle-overlay":
+      return { ...shell, showOverlay: !shell.showOverlay };
+    case "toggle-text-size":
+      return { ...shell, textSize: shell.textSize === "large" ? "regular" : "large" };
+    case "toggle-motion":
+      return { ...shell, reducedMotion: !shell.reducedMotion };
+    case "toggle-launch":
+      return { ...shell, launch: shell.launch === "pcs" ? "last-game" : "pcs" };
+    case "restore-defaults":
+      return {
+        ...shell,
+        settings: DEFAULT_SETTINGS,
+        sort: "title",
+        showHidden: false,
+        launch: "pcs",
+        sendLogs: false,
+        showOverlay: false,
+        textSize: "regular",
+        reducedMotion: false,
+        launchDebug: true,
+        countdown: null,
+        toast: { kind: "info", text: "", key: "restored" },
+      };
+    case "note-played":
+      return { ...shell, lastPlayed: stampPlayed(shell, action.appId, action.at) };
+    case "catalog":
+      return { ...shell, catalogs: { ...shell.catalogs, [action.hostId]: action.apps } };
+    case "start-failed":
+      return {
+        ...shell,
+        startError: action.failure,
+        countdown: null,
+        launchSpent: true,
+        focusId: "start-retry",
+      };
+    case "dismiss-start":
+      return { ...shell, startError: null, focusId: shell.screen === "game" ? "play-game" : "continue-last" };
+    case "retry-start": {
+      const failure = shell.startError;
+      if (!failure) {
+        return shell;
+      }
+      return requestPlay({ ...shell, selectedAppId: failure.appId, startError: null, screen: "game" });
+    }
+    case "arm-countdown": {
+      if (shell.launchSpent || shell.countdown) {
+        return shell;
+      }
+      if (shell.launch !== "last-game" || shell.startError) {
+        return { ...shell, launchSpent: true };
+      }
+      if (shell.screen !== "library") {
+        return shell;
+      }
+      const appId = continueAppId(shell);
+      if (!appId) {
+        return { ...shell, launchSpent: true };
+      }
+      return { ...shell, launchSpent: true, countdown: { appId, seconds: 3 }, focusId: "countdown-cancel" };
+    }
+    case "tick-countdown": {
+      if (!shell.countdown) {
+        return shell;
+      }
+      if (shell.countdown.seconds <= 1) {
+        const appId = shell.countdown.appId;
+        return reduceShell({ ...shell, countdown: null }, { kind: "open-game", appId });
+      }
+      return { ...shell, countdown: { appId: shell.countdown.appId, seconds: shell.countdown.seconds - 1 } };
+    }
+    case "cancel-countdown":
+      return { ...shell, countdown: null, launchSpent: true, focusId: "continue-last" };
     default: {
       const exhaustive: never = action;
       return exhaustive;
@@ -887,6 +1284,18 @@ const libraryControls = new Set([
   "setting-resolution",
   "setting-fps",
   "setting-bitrate",
+  "setting-logs",
+  "setting-overlay",
+  "setting-launch",
+  "setting-text-size",
+  "setting-motion",
+  "setting-restore",
+  "library-sort",
+  "library-hidden",
+  "hide-game",
+  "favourite-game",
+  "start-retry",
+  "countdown-cancel",
 ]);
 
 export function isLibraryControl(id: string): boolean {
@@ -937,11 +1346,44 @@ export function activateFocused(shell: Shell, id: string): Shell {
   if (id === "setting-resolution") {
     return reduceShell(shell, { kind: "cycle-setting", setting: "resolution" });
   }
-  if (id === "setting-fps") {
-    return reduceShell(shell, { kind: "cycle-setting", setting: "fps" });
-  }
   if (id === "setting-bitrate") {
     return reduceShell(shell, { kind: "cycle-setting", setting: "bitrate" });
+  }
+  if (id === "library-sort") {
+    return reduceShell(shell, { kind: "toggle-sort" });
+  }
+  if (id === "library-hidden") {
+    return reduceShell(shell, { kind: "toggle-show-hidden" });
+  }
+  if (id === "hide-game") {
+    return reduceShell(shell, { kind: "toggle-hidden" });
+  }
+  if (id === "favourite-game") {
+    return reduceShell(shell, { kind: "toggle-favourite" });
+  }
+  if (id === "setting-logs") {
+    return reduceShell(shell, { kind: "toggle-send-logs" });
+  }
+  if (id === "setting-overlay") {
+    return reduceShell(shell, { kind: "toggle-overlay" });
+  }
+  if (id === "setting-launch") {
+    return reduceShell(shell, { kind: "toggle-launch" });
+  }
+  if (id === "setting-text-size") {
+    return reduceShell(shell, { kind: "toggle-text-size" });
+  }
+  if (id === "setting-motion") {
+    return reduceShell(shell, { kind: "toggle-motion" });
+  }
+  if (id === "setting-restore") {
+    return reduceShell(shell, { kind: "restore-defaults" });
+  }
+  if (id === "start-retry") {
+    return reduceShell(shell, { kind: "retry-start" });
+  }
+  if (id === "countdown-cancel") {
+    return reduceShell(shell, { kind: "cancel-countdown" });
   }
   if (id.startsWith("game-")) {
     return reduceShell(shell, { kind: "open-game", appId: id.slice("game-".length) });

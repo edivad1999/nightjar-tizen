@@ -227,3 +227,45 @@ export function settingsRejection(
   }
   return null;
 }
+
+export type ResolutionChoice = {
+  width: number;
+  height: number;
+  label: string;
+  bitrateKbps: number;
+  experimental: boolean;
+  hdrExperimental: boolean;
+};
+
+export function modeLabel(width: number, height: number): string {
+  const match = RESOLUTIONS.find((item) => item.width === width && item.height === height);
+  return match ? match.label : `${width}x${height}`;
+}
+
+function fallbackMode(width: number, height: number): VideoMode {
+  const match = RESOLUTIONS.find((item) => item.width === width && item.height === height);
+  return {
+    width,
+    height,
+    frameRates: [...FRAME_RATES],
+    codecs: [...CODECS],
+    hdrCodecs: [],
+    defaultCodec: "hevc",
+    defaultBitrateKbps: DEFAULT_SETTINGS.bitrateKbps,
+    experimental: match?.height === 1440,
+    hdrSupported: false,
+    hdrExperimental: false,
+  };
+}
+
+export function resolutionChoices(modes: readonly VideoMode[] | null | undefined): ResolutionChoice[] {
+  const source = modes && modes.length > 0 ? modes : RESOLUTIONS.map((item) => fallbackMode(item.width, item.height));
+  return source.map((mode) => ({
+    width: mode.width,
+    height: mode.height,
+    label: modeLabel(mode.width, mode.height),
+    bitrateKbps: mode.defaultBitrateKbps,
+    experimental: mode.experimental === true || mode.height === 1440,
+    hdrExperimental: mode.hdrExperimental === true,
+  }));
+}
