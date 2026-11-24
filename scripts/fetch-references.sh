@@ -5,6 +5,9 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 ref="$root/reference"
 mkdir -p "$ref"
 
+# Remove clones this project no longer uses.
+rm -rf "$ref/vibepollo"
+
 fetch() {
   local name="$1"
   local url="$2"
@@ -20,5 +23,6 @@ fetch() {
 }
 
 fetch rubylight https://github.com/RamazanKara/Rubylight.git
-fetch vibepollo https://github.com/Nonary/Vibepollo.git
+fetch nightjar https://github.com/RamazanKara/nightjar.git
+fetch rubylight-tv-protocol https://github.com/mlopezsegura/Monlight-Tizen-WebRtc-Client.git
 fetch moonlight-webrtc-tizen https://github.com/tsoas/moonlight-webrtc-tizen.git
