@@ -23,8 +23,9 @@
 #     -o build/wake-on-lan/wake-on-lan.js
 #
 # Ubuntu 26 dropped libxml2.so.2. Samsung's clang is linked to that soname, and
-# libxml2 2.9 pulls in ICU 74. When those libraries are missing, this script
-# downloads the Ubuntu 24.04 packages and puts them on LD_LIBRARY_PATH:
+# libxml2 2.9 pulls in ICU 74. A restored cache is put on LD_LIBRARY_PATH first.
+# If clang is still missing libraries, this script downloads the Ubuntu 24.04
+# packages into that cache:
 #   libxml2 2.9.14+dfsg-1.3ubuntu3.10
 #     sha256 c5a065f85c1e6f605741e365e40cad71c3ceb0e85e2791400bd35b8896e12ad1
 #   libicu74 74.2-1ubuntu3.1
@@ -112,7 +113,31 @@ export PATH="$emscripten:$(dirname "$node_bin"):$PATH"
 
 clang="$SAMSUNG_EMSDK/fastcomp/fastcomp/bin/clang++"
 compat="$cache_root/host-libs"
-if ldd "$clang" 2>/dev/null | grep -q 'not found'; then
+
+enable_host_libs() {
+  if [[ -d "$compat" ]]; then
+    case ":${LD_LIBRARY_PATH:-}:" in
+      *":$compat:"*) ;;
+      *) export LD_LIBRARY_PATH="$compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+    esac
+  fi
+}
+
+# ldd keeps writing after the first missing library. grep -q closes that pipe
+# early, ldd dies with SIGPIPE, and pipefail then treats the library as present.
+clang_missing() {
+  local report
+  report="$(ldd "$clang" 2>/dev/null || true)"
+  grep 'not found' <<<"$report" || true
+}
+
+if [[ -e "$compat/libxml2.so.2" ]]; then
+  echo "Using cached host libraries at $compat"
+  enable_host_libs
+fi
+
+missing="$(clang_missing)"
+if [[ -n "$missing" ]]; then
   echo "Samsung clang needs Ubuntu 24.04 libxml2 and ICU"
   mkdir -p "$compat"
   install_host_deb \
@@ -123,11 +148,12 @@ if ldd "$clang" 2>/dev/null | grep -q 'not found'; then
     "https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb" \
     "c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8" \
     "libicu*.so*"
-  export LD_LIBRARY_PATH="$compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  enable_host_libs
+  missing="$(clang_missing)"
 fi
-if ldd "$clang" 2>/dev/null | grep -q 'not found'; then
+if [[ -n "$missing" ]]; then
   echo "Samsung clang is still missing host libraries:" >&2
-  ldd "$clang" | grep 'not found' >&2
+  printf '%s\n' "$missing" >&2
   exit 1
 fi
 
