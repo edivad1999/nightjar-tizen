@@ -9,41 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/samsung-emscripten
-          key: samsung-emscripten-1.39.4.7
-      - run: npm ci
+      - uses: ./.github/actions/setup-build
       - run: npm test
       - run: npm run build
       - name: The widget contains the wake module
-        run: |
-          python3 - <<'PY'
-          import zipfile
-          widget = zipfile.ZipFile("dist/nightjar.wgt")
-          names = widget.namelist()
-          assert names[0] == "mimetype"
-          required = {
-              "config.xml",
-              "index.html",
-              "app.js",
-              "ui.css",
-              "icon.png",
-              "wasm/wake-on-lan.js",
-              "wasm/wake-on-lan.wasm",
-              "wasm/wake-on-lan.worker.js",
-              "wasm/wake-on-lan.js.mem",
-              "wasm/nightjar-udp.js",
-          }
-          assert required <= set(names)
-          html = widget.read("index.html").decode()
-          assert html.index("wasm/wake-on-lan.js") < html.index("wasm/nightjar-udp.js") < html.index("app.js")
-          assert widget.read("wasm/wake-on-lan.wasm")[:4] == b"\0asm"
-          memory = widget.read("wasm/wake-on-lan.js.mem")
-          assert b"ff02::1" in memory
-          assert b'{"version":2,"type":"discover"}' in memory
-          assert "NightjarUdp" in widget.read("wasm/nightjar-udp.js").decode()
-          PY
+        run: node scripts/check-wgt.mjs
