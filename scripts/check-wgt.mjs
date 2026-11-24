@@ -51,8 +51,20 @@ const mime = files[0];
 if (!mime || mime.name !== "mimetype" || mime.method !== 0 || mime.data.toString() !== "application/widget") {
   throw new Error("wgt mimetype entry is missing or compressed");
 }
-for (const required of ["config.xml", "index.html"]) {
-  if (!names.includes(required)) throw new Error(`wgt is missing ${required}`);
+const required = [
+  "config.xml",
+  "index.html",
+  "app.js",
+  "ui.css",
+  "icon.png",
+  "wasm/wake-on-lan.js",
+  "wasm/wake-on-lan.wasm",
+  "wasm/wake-on-lan.worker.js",
+  "wasm/wake-on-lan.js.mem",
+  "wasm/nightjar-udp.js",
+];
+for (const name of required) {
+  if (!names.includes(name)) throw new Error(`wgt is missing ${name}`);
 }
 
 function widgetVersion(xml) {
@@ -67,9 +79,31 @@ if (packedVersion !== sourceVersion) {
   throw new Error(`wgt version ${packedVersion} does not match tizen/config.xml ${sourceVersion}`);
 }
 
-const html = files.find((file) => file.name === "index.html").data.toString("utf8");
+function entry(name) {
+  const file = files.find((item) => item.name === name);
+  if (!file) throw new Error(`wgt is missing ${name}`);
+  return file.data;
+}
+
+const html = entry("index.html").toString("utf8");
 if (!/<!doctype html/i.test(html) || !/<html[\s>]/i.test(html)) {
   throw new Error("index.html is not a document");
+}
+const wakeScript = html.indexOf("wasm/wake-on-lan.js");
+const udpScript = html.indexOf("wasm/nightjar-udp.js");
+const appScript = html.indexOf("app.js");
+if (!(wakeScript >= 0 && wakeScript < udpScript && udpScript < appScript)) {
+  throw new Error("index.html must load wake-on-lan.js, then nightjar-udp.js, then app.js");
+}
+if (entry("wasm/wake-on-lan.wasm").subarray(0, 4).toString("latin1") !== "\0asm") {
+  throw new Error("wake-on-lan.wasm is not WebAssembly");
+}
+const memory = entry("wasm/wake-on-lan.js.mem");
+if (!memory.includes(Buffer.from("ff02::1")) || !memory.includes(Buffer.from('{"version":2,"type":"discover"}'))) {
+  throw new Error("wake-on-lan.js.mem is missing the wake or discovery payload");
+}
+if (!entry("wasm/nightjar-udp.js").toString("utf8").includes("NightjarUdp")) {
+  throw new Error("nightjar-udp.js does not set NightjarUdp");
 }
 
 console.log(`nightjar.wgt ok, version ${packedVersion}, ${files.length} entries, unsigned`);

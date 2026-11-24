@@ -1,4 +1,4 @@
-# moonlight-tizen agent guide
+# nightjar-tizen agent guide
 
 This repository is a Tizen Nightjar: a Samsung Tizen TV client for Rubylight only. It talks Rubylight's WebRTC TV protocol, version 2, directly to the host. Model features and UX on Nightjar. Use WebRTC for the stream, because Tizen cannot run Nightjar's native Moonlight engine.
 
@@ -123,4 +123,4 @@ This table is the product bar. "Yes" means protocol v2 plus a Tizen web app can 
 
 ## Project conventions
 
-Application code, packaging, and docs for moonlight-tizen live in this repository, outside `reference/`. `reference/` is only a local reading tree. Do not rename this repository.
+Application code, packaging, and docs for nightjar-tizen live in this repository, outside `reference/`. `reference/` is only a local reading tree. Do not rename this repository.
