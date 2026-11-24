@@ -19,11 +19,12 @@ import {
 import { BrowserPeer } from "../net/browser-peer.ts";
 import { SignallingClient, type MediaPeer } from "../net/client.ts";
 import { CLIENT_LOG_FLUSH_MS } from "../net/client-log.ts";
+import { DISCOVERY_TIMEOUT_MS, hostsFromReplies, type BroadcastReply } from "../net/discover.ts";
 import { STALL_SAMPLE_INTERVAL_MS } from "../net/stall.ts";
 import { findInbound, isStatsReport, type StatsReport } from "../net/stats.ts";
 import { connectedMessage, disconnectedMessage, padsEqual, parseHostControl, readPad, stateMessage, type PadAxes, type PadReading } from "../protocol/gamepad.ts";
 import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
-import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, keyframeMessage, parseDiscoveryReply } from "../protocol/parse.ts";
+import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, WAKE_INTERVAL_MS, wakeShouldRetry } from "../protocol/wol.ts";
 import { parsePersisted, serializePersisted, updateHost, upsertHosts, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
@@ -35,8 +36,8 @@ import { applyStreamView, mountStreamOverlay, render, setStreamMenuHealth, setSt
 const STORAGE_KEY = "nightjar.tizen.v1";
 
 type UdpBridge = {
-  broadcast: (payload: Uint8Array, port: number, timeoutMs: number) => Promise<Array<{ address: string; payload: Uint8Array }>>;
-  wake: (packet: Uint8Array, address: string) => void;
+  broadcast: (payload: Uint8Array, port: number, timeoutMs: number) => Promise<BroadcastReply[]>;
+  wake: (packet: Uint8Array, address: string) => boolean;
 };
 
 type TizenInput = {
@@ -444,15 +445,18 @@ function saveAddress(): void {
 async function search(): Promise<void> {
   const bridge = globalThis.NightjarUdp;
   if (!bridge) {
-    apply({ kind: "banner", text: "This build cannot send UDP yet. Enter the PC address. On a TV, build tizen/wasm/wake-on-lan.c with Samsung Emscripten." });
+    apply({ kind: "banner", text: "This TV cannot send UDP. Enter the PC address." });
     return;
   }
   apply({ kind: "banner", text: "Searching this network." });
-  const replies = await bridge.broadcast(new TextEncoder().encode(DISCOVER_DATAGRAM), DISCOVERY_PORT, 2000);
-  const found = replies.flatMap((reply) => {
-    const host = parseDiscoveryReply(new TextDecoder().decode(reply.payload), reply.address);
-    return host ? [host] : [];
-  });
+  let replies: BroadcastReply[];
+  try {
+    replies = await bridge.broadcast(new TextEncoder().encode(DISCOVER_DATAGRAM), DISCOVERY_PORT, DISCOVERY_TIMEOUT_MS);
+  } catch (error) {
+    apply({ kind: "banner", text: error instanceof Error ? error.message : "Search failed." });
+    return;
+  }
+  const found = hostsFromReplies(replies);
   const hosts = upsertHosts(shell.hosts, found.map((item) => ({
     name: item.name,
     address: item.address,
@@ -475,9 +479,12 @@ function wakeHost(host: SavedHost): void {
     apply({ kind: "banner", text: "Wake needs the TV socket module. The address is saved." });
     return;
   }
+  if (bridge.wake(packet, host.address) === false) {
+    apply({ kind: "banner", text: "Wake needs the TV socket module. The address is saved." });
+    return;
+  }
   const token = ++wakeToken;
   const started = performance.now();
-  bridge.wake(packet, host.address);
   apply({ kind: "banner", text: `Waking ${host.name}.` });
   const retry = () => {
     if (token !== wakeToken || !wakeShouldRetry(performance.now() - started)) {

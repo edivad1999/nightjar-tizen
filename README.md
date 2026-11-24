@@ -6,7 +6,7 @@ The product model is [Nightjar](https://github.com/RamazanKara/nightjar). The wi
 
 ## What this build does
 
-- Saves PCs and connects to an address you type. Search listens for a UDP `discover` reply on port 8000 when a socket bridge is present.
+- Saves PCs and connects to an address you type, including an IPv6 literal. Search broadcasts a UDP `discover` datagram on port 8000.
 - Shows a four-digit PIN. You enter that PIN in the Rubylight console. The TV then stores the client id and secret and answers later nonces with HMAC-SHA256.
 - Lists the host's games and asks for cover art.
 - Starts a session with resolution, frame rate, bitrate, H.264, HEVC, or AV1, and HDR10. HDR is not offered for H.264 or 720p.
@@ -14,7 +14,7 @@ The product model is [Nightjar](https://github.com/RamazanKara/nightjar). The wi
 - Plays the stream, sends gamepad state and rumble, and opens a stream menu on Back or Exit. Disconnect leaves the game running. Quit game stops it on the PC.
 - Builds an unsigned `.wgt`.
 
-Wake-on-LAN and network search send UDP. A Tizen web app cannot send UDP from JavaScript. `tizen/wasm/wake-on-lan.c` is the socket module, adapted from the protocol client. Build it with Samsung's Emscripten, then set `globalThis.NightjarUdp` to `{ broadcast, wake }` before the page script. Until that module is on the TV, add the PC by address. The magic packet itself is covered by the unit tests.
+Wake-on-LAN and network search send UDP. A Tizen web app cannot send UDP from JavaScript, so `npm run build` compiles `tizen/wasm/wake-on-lan.c` with Samsung Emscripten 1.39.4.7 and packs `wasm/wake-on-lan.js`, the wasm binary, the pthread worker, and `wasm/nightjar-udp.js`. That script sets `globalThis.NightjarUdp` to `{ broadcast, wake }` before `app.js`. Each magic packet goes to `255.255.255.255`, the PC's last IPv4 address, and `ff02::1`. The exact `emcc` command is in `scripts/build-wake-on-lan.sh`. Signing stays manual.
 
 ## Build
 
@@ -52,7 +52,7 @@ This repository does not deploy to a TV.
 
 ## Run it
 
-1. In Rubylight, turn on the WebRTC server. Signalling is `ws://<pc>:8000`. Discovery, when the socket module is built, is UDP port 8000.
+1. In Rubylight, turn on the WebRTC server. Signalling is `ws://<pc>:8000`. Discovery is UDP port 8000.
 2. On the TV, add the PC address or search the network.
 3. Read the PIN on the TV and enter it in the Rubylight console.
 4. Open a game. Back opens the stream menu.

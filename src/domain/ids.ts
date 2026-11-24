@@ -24,7 +24,58 @@ export function isIpv4(value: string): boolean {
   });
 }
 
+function ipv6Groups(side: string, dottedTail: boolean): number[] | null {
+  if (side.length === 0) {
+    return [];
+  }
+  const parts = side.split(":");
+  const groups: number[] = [];
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index] ?? "";
+    if (index === parts.length - 1 && part.includes(".")) {
+      if (!dottedTail || !isIpv4(part)) {
+        return null;
+      }
+      const octets = part.split(".").map((octet) => Number(octet));
+      groups.push(((octets[0] ?? 0) << 8) | (octets[1] ?? 0), ((octets[2] ?? 0) << 8) | (octets[3] ?? 0));
+      continue;
+    }
+    if (!/^[0-9A-Fa-f]{1,4}$/.test(part)) {
+      return null;
+    }
+    groups.push(Number.parseInt(part, 16));
+  }
+  return groups;
+}
+
+function isIpv6Literal(value: string): boolean {
+  let text = value;
+  if (text.startsWith("[") && text.endsWith("]") && text.length > 2) {
+    text = text.slice(1, -1);
+  }
+  if (text.length === 0 || text.includes("%") || text.includes("/")) {
+    return false;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) {
+    return false;
+  }
+  if (halves.length === 1) {
+    const groups = ipv6Groups(halves[0] ?? "", true);
+    return groups !== null && groups.length === 8;
+  }
+  const left = ipv6Groups(halves[0] ?? "", false);
+  const right = ipv6Groups(halves[1] ?? "", true);
+  if (!left || !right) {
+    return false;
+  }
+  return left.length + right.length < 8;
+}
+
 export function isHostAddress(value: string): boolean {
+  if (value.includes(":")) {
+    return isIpv6Literal(value);
+  }
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
     return isIpv4(value);
   }
