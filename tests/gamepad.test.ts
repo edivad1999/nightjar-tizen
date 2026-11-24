@@ -32,7 +32,6 @@ function pad(spec: {
 function playing(now: number, controls: ControlPrefs = DEFAULT_CONTROLS, bufferedAmount = 0): PadEnv {
   return {
     now,
-    live: true,
     streaming: true,
     onStream: true,
     tabs: false,
@@ -46,7 +45,6 @@ function playing(now: number, controls: ControlPrefs = DEFAULT_CONTROLS, buffere
 function menu(now: number): PadEnv {
   return {
     now,
-    live: false,
     streaming: true,
     onStream: true,
     tabs: false,

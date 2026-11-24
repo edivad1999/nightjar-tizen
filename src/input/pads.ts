@@ -12,7 +12,6 @@ import {
   type PadButton,
 } from "../protocol/gamepad.ts";
 
-export const HOLD_BACK_MS = 1000;
 export const NAV_INITIAL_MS = 350;
 export const NAV_REPEAT_MS = 100;
 export const STICK_THRESHOLD = 0.55;
@@ -20,8 +19,6 @@ export const MAX_BUFFERED_BYTES = 64 * 1024;
 export const KEEPALIVE_MS = 250;
 export const MAX_CONTROLLERS = 16;
 
-const MENU_COMBO = Button.BACK | Button.START | Button.LB | Button.RB;
-const OVERLAY_COMBO = Button.BACK | Button.LB | Button.RB | Button.X;
 const NAV_BUTTONS = Button.A | Button.B | Button.X | Button.Y | Button.LB | Button.RB | Button.BACK | Button.START
   | Button.DPAD_UP | Button.DPAD_DOWN | Button.DPAD_LEFT | Button.DPAD_RIGHT;
 
@@ -49,8 +46,6 @@ export type PadSnapshot = {
 
 export type PadEnv = {
   now: number;
-  /** Menu is closed and the host stream is live, so buttons go to the PC. */
-  live: boolean;
   /** A stream exists, so the pad should be announced on the control channel. */
   streaming: boolean;
   onStream: boolean;
@@ -88,10 +83,6 @@ type Slot = {
   prevButtons: number;
   edgeFrom: number;
   raw: PadAxes;
-  backSince: number | null;
-  holdFired: boolean;
-  comboHeld: boolean;
-  overlayHeld: boolean;
 };
 
 export type PadsState = {
@@ -168,8 +159,8 @@ export function stepPads(state: PadsState, snapshots: readonly PadSnapshot[], en
       });
       slot.announced = true;
     }
-    if (env.live) {
-      driveLive(slot, axes, env, effects);
+    if (padToGame(env)) {
+      sendState(slot, axes, env, effects);
     } else {
       releaseHeld(slot, env, effects);
     }
@@ -188,13 +179,9 @@ export function stepPads(state: PadsState, snapshots: readonly PadSnapshot[], en
     slot.announced = false;
     slot.hasSent = false;
     slot.connected = false;
-    slot.backSince = null;
-    slot.holdFired = false;
-    slot.comboHeld = false;
-    slot.overlayHeld = false;
     slot.raw = { ...NEUTRAL };
   }
-  if (env.live) {
+  if (padToGame(env)) {
     state.steerId = null;
     state.direction = null;
     state.directionOwner = null;
@@ -227,10 +214,6 @@ function claim(state: PadsState, snap: PadSnapshot): Slot | null {
     parked.sequence = 0;
     parked.hasSent = false;
     parked.lastWire = { ...NEUTRAL };
-    parked.backSince = null;
-    parked.holdFired = false;
-    parked.comboHeld = false;
-    parked.overlayHeld = false;
     return parked;
   }
   if (atIndex) {
@@ -262,39 +245,11 @@ function createSlot(controllerId: number, identity: string, index: number): Slot
     prevButtons: 0,
     edgeFrom: 0,
     raw: { ...NEUTRAL },
-    backSince: null,
-    holdFired: false,
-    comboHeld: false,
-    overlayHeld: false,
   };
 }
 
-function driveLive(slot: Slot, axes: PadAxes, env: PadEnv, effects: PadEffect[]): void {
-  const buttons = axes.buttons;
-  const menu = (buttons & MENU_COMBO) === MENU_COMBO;
-  const overlay = !menu && (buttons & Button.START) === 0 && (buttons & OVERLAY_COMBO) === OVERLAY_COMBO;
-  const openMenu = menu && !slot.comboHeld;
-  const openOverlay = overlay && !slot.overlayHeld;
-  const back = (buttons & Button.BACK) !== 0;
-  let openHold = false;
-  if (!back) {
-    slot.backSince = null;
-    slot.holdFired = false;
-  } else if (slot.backSince === null) {
-    slot.backSince = env.now;
-  } else if (!menu && !slot.holdFired && env.now - slot.backSince >= HOLD_BACK_MS) {
-    slot.holdFired = true;
-    openHold = true;
-  }
-  sendState(slot, openMenu || openHold ? NEUTRAL : axes, env, effects);
-  if (openMenu || openHold) {
-    effects.push({ kind: "menu" });
-  }
-  if (openOverlay) {
-    effects.push({ kind: "overlay" });
-  }
-  slot.comboHeld = menu;
-  slot.overlayHeld = overlay;
+function padToGame(env: PadEnv): boolean {
+  return env.streaming || env.onStream;
 }
 
 function releaseHeld(slot: Slot, env: PadEnv, effects: PadEffect[]): void {
@@ -310,7 +265,7 @@ function sendState(slot: Slot, axes: PadAxes, env: PadEnv, effects: PadEffect[])
   }
   const wire: PadAxes = { ...axes, buttons: flipFaceButtons(axes.buttons, env.controls) };
   const changed = !slot.hasSent || !padsEqual(slot.lastWire, wire);
-  if (!changed && (!env.live || env.now - slot.lastSentAt < KEEPALIVE_MS)) {
+  if (!changed && (!env.streaming || env.now - slot.lastSentAt < KEEPALIVE_MS)) {
     return;
   }
   if (env.bufferedAmount > MAX_BUFFERED_BYTES) {
@@ -367,9 +322,6 @@ function navigate(state: PadsState, env: PadEnv, effects: PadEffect[]): void {
   const buttons = leader.raw.buttons;
   const previous = leader.edgeFrom;
   const press = (bit: number) => (buttons & bit) !== 0 && (previous & bit) === 0;
-  if (env.onStream && press(Button.START)) {
-    effects.push({ kind: "menu" });
-  }
   if (press(Button.A)) {
     effects.push({ kind: "activate" });
   }

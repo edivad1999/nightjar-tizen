@@ -1,4 +1,4 @@
-export const TV_KEYS = ["Exit", "Menu", "Info", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue"];
+export const TV_KEYS = ["Menu", "Info", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue"];
 
 export type TizenKeys = {
   tvinputdevice?: {

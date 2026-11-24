@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { BrowserPeer, openInputChannel } from "../src/net/browser-peer.ts";
 import { InputSession, Wheel, encodeInputMessage, pointerMessages, textMessages } from "../src/protocol/input.ts";
-import { applyStreamKey, keyAction, streamKeyDecision } from "../src/ui/keys.ts";
+import { applyStreamKey, keyAction, leavesForTv, streamKeyDecision } from "../src/ui/keys.ts";
 import { text } from "../src/ui/strings.ts";
 import { initialShell, reduceShell, type Shell } from "../src/ui/model.ts";
 
@@ -68,6 +68,10 @@ test("remote Back opens the stream menu and is not a key", () => {
   assert.equal(keyAction("", 10009), "back");
   assert.equal(streamKeyDecision({ ...back, type: "keydown" }, true).kind, "menu");
   assert.equal(streamKeyDecision({ ...back, type: "keydown" }, true, true).kind, "pass");
+  assert.equal(leavesForTv(back, false), false);
+  assert.equal(leavesForTv(back, true), true);
+  assert.equal(leavesForTv({ code: "Exit", key: "Exit", keyCode: 10182 }, false), true);
+  assert.equal(leavesForTv({ code: "XF86Back", key: "XF86Back", keyCode: 10009 }, true), true);
   assert.equal(text("en", "backOpensMenu"), "Remote Back opens the menu");
   assert.equal(text("it", "backOpensMenu"), "Indietro del telecomando apre il menu");
   shell = reduceShell(shell, { kind: "back" });
