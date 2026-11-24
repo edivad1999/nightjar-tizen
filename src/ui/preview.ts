@@ -4,7 +4,8 @@ import type { AppEntry } from "../protocol/parse.ts";
 import { initialShell, reduceShell } from "./model.ts";
 import { FRAME_INTERPOLATION, applyStreamView } from "./overlay.ts";
 import { shellForShot } from "./shots.ts";
-import { mountStreamOverlay, render, setStreamOverlayVisible } from "./view.ts";
+import { text } from "./strings.ts";
+import { applyLaunchPanel, applyStreamHint, mountLaunchPanel, mountStreamHint, mountStreamOverlay, render, setStreamChromeParked, setStreamOverlayVisible } from "./view.ts";
 
 const params = new URLSearchParams(location.search);
 const shot = params.get("shot");
@@ -23,40 +24,49 @@ if (shot) {
     appRoot.textContent = `Unknown shot ${shot}`;
   } else {
     render(appRoot, framed);
-    if (shot === "overlay") {
+    if (shot === "overlay" || shot === "menu-overlay" || shot === "stream-hint") {
       const nodes = mountStreamOverlay(document.body);
-      setStreamOverlayVisible(true);
-      applyStreamView(nodes, {
-        facts: {
-          app: "Celeste",
-          latency: "18.4 ms",
-          packetLoss: "0.12 % (session 0.40 %)",
-          resolution: "1920x1080",
-          fps: "60",
-          codec: "HEVC (H.265)",
-          bitrate: "20.0 Mbps",
-          hdr: "Off",
-          gamepad: "1",
-          connection: "Connected",
-          interpolation: FRAME_INTERPOLATION,
-          recovery: "No stalls",
-        },
-        performance: {
-          shown: true,
-          buttonLabel: "Hide performance overlay",
-          fps: "59",
-          fpsTarget: "/ 60",
-          fpsLow: false,
-          total: "18.4 ms",
-          average: "17.1 ms",
-          network: "4.2 ms",
-          jitterBuffer: "6.0 ms",
-          decode: "5.1 ms",
-          toScreen: "3.1 ms",
-          packetLoss: "0.12 %",
-          framesDropped: "0",
-        },
-      });
+      const hint = mountStreamHint(nodes.hintParent);
+      if (shot !== "stream-hint") {
+        setStreamOverlayVisible(true);
+        applyStreamView(nodes, {
+          facts: {
+            app: "Celeste",
+            latency: "18.4 ms",
+            packetLoss: "0.12 % (session 0.40 %)",
+            resolution: "1920x1080",
+            fps: "60",
+            codec: "HEVC (H.265)",
+            bitrate: "20.0 Mbps",
+            hdr: "Off",
+            gamepad: "1",
+            connection: "Connected",
+            interpolation: FRAME_INTERPOLATION,
+            recovery: "No stalls",
+          },
+          performance: {
+            shown: true,
+            buttonLabel: "Hide performance overlay",
+            fps: "59",
+            fpsTarget: "/ 60",
+            fpsLow: false,
+            total: "18.4 ms",
+            average: "17.1 ms",
+            network: "4.2 ms",
+            jitterBuffer: "6.0 ms",
+            decode: "5.1 ms",
+            toScreen: "3.1 ms",
+            packetLoss: "0.12 %",
+            framesDropped: "0",
+          },
+        });
+      }
+      applyStreamHint(hint, text("en", "backOpensMenu"), shot === "menu-overlay" ? "hidden" : "back");
+      setStreamChromeParked(shot === "menu-overlay");
+      if (shot === "overlay") {
+        const panel = mountLaunchPanel(nodes.launchParent);
+        applyLaunchPanel(panel, "+0ms play celeste\n+40ms playback playing\n+80ms stream live streaming", true);
+      }
     }
     document.body.dataset.ready = "yes";
     document.body.dataset.screen = framed.screen;

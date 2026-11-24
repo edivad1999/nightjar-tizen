@@ -155,10 +155,13 @@ export function shellForShot(name: string): Shell | null {
     shell = reduceShell(shell, { kind: "open-settings" });
     return reduceShell(shell, { kind: "toggle-more" });
   }
-  if (name === "stream-menu" || name === "stream-hint" || name === "overlay") {
+  if (name === "stream-menu" || name === "stream-hint" || name === "overlay" || name === "menu-overlay") {
     let shell = online(library, { kind: "live", appId: "celeste", state: "streaming", sessionId: 4 });
-    if (name === "stream-menu") {
+    if (name === "stream-menu" || name === "menu-overlay") {
       shell = reduceShell(shell, { kind: "back" });
+    }
+    if (name === "overlay") {
+      shell = reduceShell(shell, { kind: "toast", toast: { kind: "info", text: "Picture stalled" } });
     }
     return shell;
   }
