@@ -6,6 +6,7 @@ export type ControlPrefs = {
   flipXY: boolean;
   rumble: boolean;
   swapMouseButtons: boolean;
+  localInput: boolean;
 };
 
 export const DEFAULT_CONTROLS: ControlPrefs = {
@@ -13,6 +14,7 @@ export const DEFAULT_CONTROLS: ControlPrefs = {
   flipXY: false,
   rumble: true,
   swapMouseButtons: false,
+  localInput: true,
 };
 
 function flag(value: unknown, fallback: boolean): boolean {
@@ -32,6 +34,7 @@ export function parseControlPrefs(value: unknown): ControlPrefs {
     flipXY: flag(value.flipXY, DEFAULT_CONTROLS.flipXY),
     rumble: flag(value.rumble, DEFAULT_CONTROLS.rumble),
     swapMouseButtons: flag(value.swapMouseButtons, DEFAULT_CONTROLS.swapMouseButtons),
+    localInput: flag(value.localInput, DEFAULT_CONTROLS.localInput),
   };
 }
 
@@ -41,6 +44,7 @@ export function serializeControlPrefs(prefs: ControlPrefs): string {
     flipXY: prefs.flipXY,
     rumble: prefs.rumble,
     swapMouseButtons: prefs.swapMouseButtons,
+    localInput: prefs.localInput,
   });
 }
 
