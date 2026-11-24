@@ -1,2 +1,7 @@
 reference/
 .DS_Store
+
+node_modules/
+dist/
+staging/
+*.wgt

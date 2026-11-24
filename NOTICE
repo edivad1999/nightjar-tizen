@@ -1,0 +1,20 @@
+Nightjar for Tizen
+Copyright (C) 2026 the moonlight-tizen authors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+The signalling messages follow Rubylight's WebRTC TV protocol, version 2
+(https://github.com/RamazanKara/Rubylight) and the contract published in
+Monlight-Tizen-WebRtc-Client (https://github.com/mlopezsegura/Monlight-Tizen-WebRtc-Client).
+
+tizen/wasm/wake-on-lan.c is adapted from that client's tizen/wasm/wake-on-lan.c.
+
+The authentication label moonlight-webrtc-tv-auth-v1 and the gamepad button
+bits are part of that protocol. SHA-256 and HMAC-SHA256 in this tree are an
+independent implementation of FIPS 180-4 and RFC 2104. A Tizen web app is not
+a secure context, so crypto.subtle is not used.
+
+The retired Windows gateway in tsoas/moonlight-webrtc-tizen is not included.
