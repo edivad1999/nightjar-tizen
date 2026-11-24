@@ -1078,13 +1078,13 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
 
   if (shell.screen === "stream") {
     const stream = snapshot?.stream ?? { kind: "none" as const };
+    page.className = shell.menuOpen ? "page hide-pointer" : "page stream-clear hide-pointer";
     if (!shell.menuOpen) {
       const state = stream.kind === "starting" ? stream.state : stream.kind === "live" ? "streaming" : "stream";
       page.append(el("p", "stream-hint", state === "streaming" ? say(shell, "backOpensMenu") : say(shell, "starting", { state })));
       if (shell.playbackBlocked) {
         page.append(button("play-audio", say(shell, "pressOkForSound"), "button primary playback-prompt"));
       }
-      page.classList.add("stream-clear");
     } else {
       const menu = el("section", "stream-menu");
       menu.append(el("h2", "title", say(shell, "wordmark")));

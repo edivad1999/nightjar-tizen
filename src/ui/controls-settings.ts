@@ -13,6 +13,7 @@ const rows = [
   { id: "setting-flip-xy", key: "flipXy", field: "flipXY" },
   { id: "setting-rumble", key: "rumble", field: "rumble" },
   { id: "setting-swap-mouse", key: "swapMouse", field: "swapMouseButtons" },
+  { id: "setting-local-input", key: "localInput", field: "localInput" },
 ] as const;
 
 export type ControlSettingId = (typeof rows)[number]["id"];

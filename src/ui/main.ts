@@ -36,7 +36,8 @@ import {
   type PadEffect,
   type PadSnapshot,
 } from "../input/pads.ts";
-import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
+import { armKeyboard, keyboardIsActive, localPointer, routeStreamKey, type KeyboardLatch, type Point } from "../input/local-input.ts";
+import { InputSession, Wheel, keyMessage, textMessages } from "../protocol/input.ts";
 import { DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, stepWakePlay, type WakePlay } from "../protocol/wol.ts";
 import { openArtworkCache, type CachedApp } from "../storage/artwork-cache.ts";
@@ -283,6 +284,8 @@ const peer = new BrowserPeer(streamVideo);
 const streamInput = new InputSession((text) => peer.sendInput(text));
 const wheel = new Wheel();
 let pointerButtons = 0;
+let pointerPoint: Point | null = null;
+let keyboardLatch: KeyboardLatch | null = null;
 let capturingInput = false;
 const pads = createPads();
 let padToken = "";
@@ -389,6 +392,8 @@ function streamCapturing(): boolean {
 function releaseStreamInput(): void {
   streamInput.releaseAll();
   pointerButtons = 0;
+  pointerPoint = null;
+  keyboardLatch = null;
   wheel.reset();
   if (document.pointerLockElement) {
     document.exitPointerLock();
@@ -1139,6 +1144,41 @@ function keySample(event: KeyboardEvent, type: "keydown" | "keyup"): KeySample {
   return { type, code: event.code, key: event.key, keyCode: event.keyCode };
 }
 
+function streamUiOpen(): boolean {
+  if (shell.screen !== "stream") {
+    return true;
+  }
+  return shell.menuOpen || shell.playbackBlocked || shell.startError !== null;
+}
+
+function takeStreamKey(event: KeyboardEvent, type: "keydown" | "keyup"): "ui" | "done" {
+  const sample = keySample(event, type);
+  if (leavesForTv(sample, event.repeat)) {
+    return "ui";
+  }
+  const now = Date.now();
+  const route = routeStreamKey({
+    uiOpen: streamUiOpen(),
+    enabled: controlPrefs().localInput,
+    keyboardActive: keyboardIsActive(keyboardLatch, now),
+    event: sample,
+  });
+  if (route.arm) {
+    keyboardLatch = armKeyboard(now);
+  }
+  if (route.kind === "ui") {
+    return "ui";
+  }
+  event.preventDefault();
+  if (route.kind === "host") {
+    const message = keyMessage(route.code, route.down);
+    if (message) {
+      streamInput.send(message);
+    }
+  }
+  return "done";
+}
+
 document.addEventListener("keydown", (event) => {
   const sample = keySample(event, "keydown");
   if (leavesForTv(sample, event.repeat)) {
@@ -1147,6 +1187,9 @@ document.addEventListener("keydown", (event) => {
   if (shell.playbackBlocked && shell.screen === "stream" && keyAction(event.code, event.keyCode) === "activate") {
     event.preventDefault();
     peer.primePlayback();
+    return;
+  }
+  if (takeStreamKey(event, "keydown") === "done") {
     return;
   }
   const outcome = applyStreamKey({
@@ -1197,9 +1240,17 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("keyup", (event) => {
+  const sample = keySample(event, "keyup");
+  if (leavesForTv(sample, event.repeat)) {
+    return;
+  }
+  if (takeStreamKey(event, "keyup") === "done") {
+    return;
+  }
   const outcome = applyStreamKey({
     capturing: streamCapturing(),
-    event: keySample(event, "keyup"),
+    event: sample,
+    repeat: event.repeat,
     send: (message) => {
       streamInput.send(message);
     },
@@ -1210,7 +1261,10 @@ document.addEventListener("keyup", (event) => {
 });
 
 function onPointer(event: PointerEvent): void {
-  if (!streamCapturing() || event.pointerType === "touch" || event.pointerType === "pen") {
+  if (event.pointerType === "touch" || event.pointerType === "pen") {
+    return;
+  }
+  if (!controlPrefs().localInput || !streamCapturing()) {
     return;
   }
   if (event.type === "pointerdown" && document.pointerLockElement !== streamVideo) {
@@ -1218,11 +1272,10 @@ function onPointer(event: PointerEvent): void {
       const lock = streamVideo.requestPointerLock();
       void Promise.resolve(lock).catch(() => undefined);
     } catch {
-      // The TV keeps the absolute pointer when lock is refused.
+      // Lock can be missing on this TV. Later samples use client position as a delta.
     }
   }
-  const rect = streamVideo.getBoundingClientRect();
-  const messages = pointerMessages({
+  const result = localPointer({
     locked: document.pointerLockElement === streamVideo,
     pointerType: event.pointerType,
     movementX: event.movementX,
@@ -1231,12 +1284,12 @@ function onPointer(event: PointerEvent): void {
     clientY: event.clientY,
     buttons: event.buttons,
     previousButtons: pointerButtons,
-    box: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-    video: { width: streamVideo.videoWidth, height: streamVideo.videoHeight },
+    previousPoint: pointerPoint,
     swapButtons: controlPrefs().swapMouseButtons,
   });
   pointerButtons = event.buttons;
-  for (const message of messages) {
+  pointerPoint = result.point;
+  for (const message of result.messages) {
     streamInput.send(message);
   }
 }
@@ -1246,14 +1299,14 @@ document.addEventListener("pointermove", onPointer);
 document.addEventListener("pointerup", onPointer);
 document.addEventListener("pointercancel", onPointer);
 document.addEventListener("wheel", (event) => {
-  if (!streamCapturing()) {
+  if (!controlPrefs().localInput || !streamCapturing()) {
     return;
   }
   event.preventDefault();
   streamInput.send(wheel.message(event.deltaX, event.deltaY, event.deltaMode));
 }, { passive: false });
 document.addEventListener("compositionend", (event) => {
-  if (!streamCapturing()) {
+  if (!controlPrefs().localInput || !streamCapturing()) {
     return;
   }
   for (const message of textMessages(event.data)) {

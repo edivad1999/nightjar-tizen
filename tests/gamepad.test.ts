@@ -252,17 +252,20 @@ test("controller settings persist and the More rows use English and Italian", ()
   assert.equal(parsed.flipAB, true);
   assert.equal(parsed.rumble, false);
   assert.equal(parsed.swapMouseButtons, false);
+  assert.equal(parsed.localInput, true);
+  assert.equal(parseControlPrefs({ flipAB: true }).localInput, true);
   assert.deepEqual(loadControlPrefs("not json"), DEFAULT_CONTROLS);
   const toggled = toggleControl(parsed, "setting-swap-mouse");
   assert.equal(toggled?.swapMouseButtons, true);
+  assert.equal(toggleControl(parsed, "setting-local-input")?.localInput, false);
   assert.equal(toggleControl(parsed, "setting-resolution"), null);
 
   const en = controlRows(DEFAULT_CONTROLS, (key) => text("en", key)).map((row) => row.label);
   const it = controlRows(DEFAULT_CONTROLS, (key) => text("it", key)).map((row) => row.label);
-  assert.deepEqual(en, ["Swap A and B · Off", "Swap X and Y · Off", "Rumble · On", "Swap mouse buttons · Off"]);
+  assert.deepEqual(en, ["Swap A and B · Off", "Swap X and Y · Off", "Rumble · On", "Swap mouse buttons · Off", "Mouse and keyboard · On"]);
   assert.ok(it[0]?.startsWith("Scambia A e B"));
   assert.equal(it[0]?.includes("Swap"), false);
-  assert.deepEqual(CONTROL_IDS, ["setting-flip-ab", "setting-flip-xy", "setting-rumble", "setting-swap-mouse"]);
+  assert.deepEqual(CONTROL_IDS, ["setting-flip-ab", "setting-flip-xy", "setting-rumble", "setting-swap-mouse", "setting-local-input"]);
 
   let shell = reduceShell(initialShell(), { kind: "open-settings" });
   shell = reduceShell(shell, { kind: "toggle-more" });
