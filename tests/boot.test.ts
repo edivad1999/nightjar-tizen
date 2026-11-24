@@ -108,6 +108,19 @@ function matches(node: BootNode, selector: string): boolean {
   return node.tagName === selector.toUpperCase();
 }
 
+function findByClass(node: BootNode, token: string): BootNode | null {
+  if (node.className.split(/\s+/).includes(token)) {
+    return node;
+  }
+  for (const child of node.children) {
+    const found = findByClass(child, token);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
 function findDescendant(node: BootNode, selector: string): BootNode | null {
   for (const child of node.children) {
     if (matches(child, selector)) {
@@ -277,7 +290,13 @@ test("first launch shows the PC list and focuses Add a PC with no key press", as
   assert.match(textOf(page), /Add a PC/);
   const focused = active;
   assert.equal(focused?.id, "add-host");
-  assert.equal(focused?.textContent, "Add a PC");
+  assert.match(textOf(focused), /Add a PC/);
   assert.equal(shown(focused), true);
   assert.notEqual(focused, video);
+  for (const name of ["stream-overlay", "performance-hud-left", "performance-hud-right"]) {
+    const node = findByClass(body, name);
+    assert.ok(node, name);
+    assert.equal(node.hidden, true);
+    assert.equal(shown(node), false);
+  }
 });

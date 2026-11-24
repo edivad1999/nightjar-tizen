@@ -30,6 +30,7 @@ import { parsePersisted, serializePersisted, updateHost, upsertHosts, type Saved
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { activateFocused, addressDraft, addressIssue, initialShell, isLibraryControl, reduceShell, type PairNotice, type SessionCommand, type Shell } from "./model.ts";
+import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import type { Locale } from "./strings.ts";
 import { applyStreamView, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
@@ -470,7 +471,9 @@ function activate(id: string): void {
     return;
   }
   if (id === MENU_STATS_ID) {
-    applyStreamView(overlayNodes, health.togglePerformance());
+    const next = health.togglePerformance();
+    applyStreamView(overlayNodes, next);
+    setStreamOverlayVisible(healthOverlayVisible(shell.screen === "stream", next.performance.shown));
     paint();
     return;
   }
@@ -895,12 +898,12 @@ async function readStream(): Promise<void> {
       health.resetSession();
       presentedFrames = 0;
       streamingHealth = false;
-      setStreamOverlayVisible(false);
     }
+    setStreamOverlayVisible(false);
     return;
   }
   streamingHealth = true;
-  setStreamOverlayVisible(true);
+  setStreamOverlayVisible(healthOverlayVisible(true, health.performanceShown()));
   watchPresented();
   readingStream = true;
   let report: RTCStatsReport | null = null;

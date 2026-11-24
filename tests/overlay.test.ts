@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createStreamHealth, type StreamContext } from "../src/ui/stream-health.ts";
-import { FRAME_INTERPOLATION, applyStreamView, type OverlayNodes } from "../src/ui/overlay.ts";
+import { FRAME_INTERPOLATION, applyStreamView, healthOverlayVisible, type OverlayNodes } from "../src/ui/overlay.ts";
 import type { StatsReport } from "../src/net/stats.ts";
 
 const context: StreamContext = {
@@ -147,6 +147,10 @@ test("the overlay updates from a fake getStats report", () => {
   assert.equal(painted.view.codec.textContent, "HEVC (H.265)");
   assert.equal(painted.view.interpolation.textContent, "Off");
   assert.equal(painted.view.fpsPanel.hidden, true);
+  assert.equal(healthOverlayVisible(false, false), false);
+  assert.equal(healthOverlayVisible(false, true), false);
+  assert.equal(healthOverlayVisible(true, false), false);
+  assert.equal(healthOverlayVisible(true, true), true);
 
   const shown = health.togglePerformance();
   applyStreamView(painted.view, shown);
