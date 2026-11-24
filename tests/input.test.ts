@@ -193,6 +193,8 @@ function streamingShell(): Shell {
           sessionActive: true,
           runningAppId: "7",
           modes: [],
+          extensions: { audioChannels: [2], input: { label: "input", version: 1, keyboard: true, mouse: true }, codecFrameRates: [] },
+          audioChannels: 2,
           apps: [],
           artwork: {},
           stream: { kind: "live", appId: "7", state: "streaming", sessionId: 1 },

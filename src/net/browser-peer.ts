@@ -135,4 +135,11 @@ export class BrowserPeer implements MediaPeer {
     this.video.srcObject = current;
     void this.video.play();
   }
+
+  async stats(): Promise<RTCStatsReport | null> {
+    if (!this.pc) {
+      return null;
+    }
+    return this.pc.getStats();
+  }
 }

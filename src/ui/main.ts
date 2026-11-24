@@ -18,6 +18,9 @@ import {
 } from "../domain/settings.ts";
 import { BrowserPeer } from "../net/browser-peer.ts";
 import { SignallingClient, type MediaPeer } from "../net/client.ts";
+import { CLIENT_LOG_FLUSH_MS } from "../net/client-log.ts";
+import { STALL_SAMPLE_INTERVAL_MS } from "../net/stall.ts";
+import { findInbound, isStatsReport, type StatsReport } from "../net/stats.ts";
 import { connectedMessage, disconnectedMessage, padsEqual, parseHostControl, readPad, stateMessage, type PadAxes, type PadReading } from "../protocol/gamepad.ts";
 import { InputSession, Wheel, pointerMessages, textMessages } from "../protocol/input.ts";
 import { CLIENT_NAME, DISCOVER_DATAGRAM, DISCOVERY_PORT, keyframeMessage, parseDiscoveryReply } from "../protocol/parse.ts";
@@ -26,7 +29,8 @@ import { parsePersisted, serializePersisted, updateHost, upsertHosts, type Saved
 import { moveFocus, type FocusItem } from "./focus.ts";
 import { applyStreamKey, keyAction, type KeySample } from "./keys.ts";
 import { initialShell, reduceShell, type Shell } from "./model.ts";
-import { render } from "./view.ts";
+import { createStreamHealth, type StreamContext } from "./stream-health.ts";
+import { applyStreamView, mountStreamOverlay, render, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
 
 const STORAGE_KEY = "nightjar.tizen.v1";
 
@@ -118,9 +122,12 @@ const pads = new Map<number, { sequence: number; last: PadAxes; announced: boole
 const artRequested = new Set<string>();
 let wakeToken = 0;
 let probedModes = "";
-let stallSince = performance.now();
-let lastTime = 0;
-let keyframeSent = false;
+let presentedFrames = 0;
+let presentedWatching = false;
+let streamingHealth = false;
+let readingStream = false;
+const health = createStreamHealth();
+const overlayNodes = mountStreamOverlay(document.body);
 
 function persist(): void {
   localStorage.setItem(STORAGE_KEY, serializePersisted({ hosts: shell.hosts, settings: shell.settings }));
@@ -149,6 +156,7 @@ function paint(): void {
     releaseStreamInput();
   }
   capturingInput = capture;
+  setStreamMenuHealth(health.performanceShown(), health.logsEnabled());
   focusItems = render(appRoot, shell);
   const focus = focusItems.find((item) => item.id === shell.focusId) ?? focusItems[0];
   if (focus) {
@@ -215,6 +223,9 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
     if (shell.activeAddress) {
       rememberHost(shell.activeAddress, { macAddress });
     }
+  },
+  onServerError: (code, message) => {
+    health.noteHostMessage({ code, message });
   },
 }, (url) => new WebSocket(url));
 
@@ -347,6 +358,16 @@ function activate(id: string): void {
   }
   if (id === "menu-resume") {
     apply({ kind: "toggle-menu" });
+    return;
+  }
+  if (id === MENU_STATS_ID) {
+    applyStreamView(overlayNodes, health.togglePerformance());
+    paint();
+    return;
+  }
+  if (id === MENU_LOGS_ID) {
+    health.toggleSendLogs();
+    paint();
     return;
   }
   if (id === "menu-disconnect") {
@@ -691,30 +712,99 @@ function dpadDirection(buttons: number, previous: number): "up" | "down" | "left
   return null;
 }
 
-window.setInterval(() => {
-  if (shell.screen !== "stream" || streamVideo.readyState < 2) {
-    lastTime = streamVideo.currentTime;
-    stallSince = performance.now();
-    keyframeSent = false;
+function streamContext(): StreamContext {
+  const phase = shell.link.phase;
+  const snapshot = phase.kind === "online" ? phase.snapshot : null;
+  const appId = snapshot && snapshot.stream.kind !== "none" ? snapshot.stream.appId : snapshot?.runningAppId ?? "";
+  const app = snapshot?.apps.find((item) => item.id === appId);
+  return {
+    appTitle: app?.title ?? "Stream",
+    width: shell.settings.width,
+    height: shell.settings.height,
+    fps: shell.settings.fps,
+    codec: shell.settings.codec,
+    bitrateKbps: shell.settings.bitrateKbps,
+    hdr: shell.settings.hdr,
+    videoWidth: streamVideo.videoWidth,
+    videoHeight: streamVideo.videoHeight,
+    gamepadConnected: pads.size > 0,
+    gamepadLabel: pads.size > 0 ? "Connected" : "Disconnected",
+    connection: phase.kind,
+  };
+}
+
+function watchPresented(): void {
+  if (presentedWatching || typeof streamVideo.requestVideoFrameCallback !== "function") {
     return;
   }
-  if (streamVideo.currentTime !== lastTime) {
-    lastTime = streamVideo.currentTime;
-    stallSince = performance.now();
-    keyframeSent = false;
+  presentedWatching = true;
+  streamVideo.requestVideoFrameCallback((_now, metadata) => {
+    presentedWatching = false;
+    if (shell.screen !== "stream") {
+      return;
+    }
+    presentedFrames += 1;
+    health.recordPresentedFrame(metadata);
+    watchPresented();
+  });
+}
+
+async function readStream(): Promise<void> {
+  if (readingStream) {
     return;
   }
-  const stalled = performance.now() - stallSince;
-  if (stalled > 1000 && !keyframeSent) {
-    peer.sendControl(keyframeMessage("not-decoding"));
-    keyframeSent = true;
+  if (shell.screen !== "stream") {
+    if (streamingHealth) {
+      health.resetSession();
+      presentedFrames = 0;
+      streamingHealth = false;
+      setStreamOverlayVisible(false);
+    }
+    return;
   }
-  if (stalled > 2500) {
+  streamingHealth = true;
+  setStreamOverlayVisible(true);
+  watchPresented();
+  readingStream = true;
+  let report: RTCStatsReport | null = null;
+  try {
+    report = await peer.stats();
+  } finally {
+    readingStream = false;
+  }
+  if (!report || shell.screen !== "stream") {
+    return;
+  }
+  const list: StatsReport[] = [];
+  report.forEach((item: unknown) => {
+    if (isStatsReport(item)) {
+      list.push(item);
+    }
+  });
+  const video = findInbound(list, "video");
+  const framesCallback = typeof streamVideo.requestVideoFrameCallback === "function";
+  const verdict = health.sampleStall({
+    time: performance.now(),
+    bytesReceived: typeof video?.bytesReceived === "number" ? video.bytesReceived : undefined,
+    framesDecoded: typeof video?.framesDecoded === "number" ? video.framesDecoded : undefined,
+    framesPresented: framesCallback ? presentedFrames : undefined,
+  });
+  if (verdict.action === "keyframe") {
+    peer.sendControl(keyframeMessage(verdict.picture));
+  } else if (verdict.action === "reattach") {
     peer.reattach();
     peer.sendControl(keyframeMessage("reattached"));
-    stallSince = performance.now();
   }
-}, 500);
+  applyStreamView(overlayNodes, health.ingestStats(list, streamContext()));
+}
+
+window.setInterval(() => {
+  void readStream();
+}, STALL_SAMPLE_INTERVAL_MS);
+
+window.setInterval(() => {
+  health.flushLogs((message) => client.send(JSON.stringify(message)));
+}, CLIENT_LOG_FLUSH_MS);
 
 const tizen = (globalThis as { tizen?: TizenInput }).tizen;
 tizen?.tvinputdevice?.registerKeyBatch?.(["Exit", "Menu", "Info", "ColorF0Red", "ColorF1Green", "ColorF2Yellow", "ColorF3Blue"]);
