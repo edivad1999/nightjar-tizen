@@ -1,10 +1,11 @@
+import type { AudioChannels } from "../domain/settings.ts";
 import { prepareLocalAnswer, prepareRemoteOffer } from "../protocol/sdp.ts";
 import { initialLink, step, type Effect, type Intent, type LinkState, type StepContext } from "../protocol/machine.ts";
 import { parseServerMessage, type Credentials } from "../protocol/parse.ts";
 
 export type MediaPeer = {
   acceptOffer: (sdp: string) => Promise<void>;
-  createAnswer: () => Promise<string>;
+  createAnswer: (channels?: AudioChannels) => Promise<string>;
   addCandidate: (candidate: string, mid: string) => Promise<void>;
   close: () => void;
   sendGamepad: (text: string) => void;
@@ -137,7 +138,7 @@ export class SignallingClient {
         this.hooks.onMac(effect.macAddress);
         return;
       case "apply-offer":
-        void this.acceptOffer(effect.sessionId, effect.sdp);
+        void this.acceptOffer(effect.sessionId, effect.sdp, effect.channels);
         return;
       case "apply-candidate":
         if (this.offerApplied) {
@@ -159,12 +160,12 @@ export class SignallingClient {
     }
   }
 
-  private async acceptOffer(sessionId: number, sdp: string): Promise<void> {
+  private async acceptOffer(sessionId: number, sdp: string, channels: AudioChannels = 2): Promise<void> {
     const token = ++this.offerToken;
     this.offerApplied = false;
     try {
       await this.peer.acceptOffer(prepareRemoteOffer(sdp));
-      const local = await this.peer.createAnswer();
+      const local = await this.peer.createAnswer(channels);
       if (token !== this.offerToken) {
         return;
       }
@@ -176,7 +177,7 @@ export class SignallingClient {
       if (token !== this.offerToken) {
         return;
       }
-      this.dispatch({ kind: "answer", sessionId, sdp: prepareLocalAnswer(sdp, local) });
+      this.dispatch({ kind: "answer", sessionId, sdp: prepareLocalAnswer(sdp, local, channels) });
     } catch (error) {
       if (token !== this.offerToken) {
         return;

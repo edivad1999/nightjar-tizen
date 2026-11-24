@@ -109,7 +109,8 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       const settings = applySettings(shell.settings, action.patch);
       const phase = shell.link.phase;
       const modes = phase.kind === "online" ? phase.snapshot.modes : null;
-      const rejection = settingsRejection(settings, modes);
+      const extensions = phase.kind === "online" ? phase.snapshot.extensions : null;
+      const rejection = settingsRejection(settings, modes, extensions);
       return { ...shell, settings, banner: rejection };
     }
     case "link": {

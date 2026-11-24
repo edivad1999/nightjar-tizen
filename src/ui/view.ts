@@ -1,4 +1,16 @@
-import { RESOLUTIONS, BITRATES_KBPS, FRAME_RATES, CODECS, hdrAllowed } from "../domain/settings.ts";
+import { frameRateMaximum, readVideoReceiverCapabilities, tvReceivesAv1 } from "../domain/probe.ts";
+import {
+  RESOLUTIONS,
+  BITRATES_KBPS,
+  CODECS,
+  audioLabel,
+  codecsFor,
+  fitAudio,
+  frameRatesFor,
+  hdrAllowed,
+  lockFrameRate,
+  selectableAudio,
+} from "../domain/settings.ts";
 import type { FocusItem } from "./focus.ts";
 import type { Shell } from "./model.ts";
 
@@ -155,25 +167,43 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     page.append(el("h2", "title", "Video"));
     const phase = shell.link.phase;
     const modes = phase.kind === "online" ? phase.snapshot.modes : [];
+    const extensions = phase.kind === "online" ? phase.snapshot.extensions : null;
+    const selected = modes.find((mode) => mode.width === shell.settings.width && mode.height === shell.settings.height) ?? null;
+    const receivesAv1 = tvReceivesAv1(readVideoReceiverCapabilities());
+    const codecs = selected
+      ? codecsFor(selected, extensions, receivesAv1)
+      : CODECS.filter((codec) => receivesAv1 || codec !== "av1");
+    const hostRates = frameRatesFor(selected, shell.settings.codec, extensions);
+    const shownRates = lockFrameRate(hostRates, selected ? frameRateMaximum(selected, shell.settings.codec) : null);
+    const shownFps = shownRates.includes(shell.settings.fps) ? shell.settings.fps : (shownRates[0] ?? shell.settings.fps);
     const resolution = button("setting-resolution", resolutionLabel(shell));
-    const fps = button("setting-fps", `${shell.settings.fps} fps`);
+    const fps = button("setting-fps", `${shownFps} fps`);
     const bitrate = button("setting-bitrate", `${shell.settings.bitrateKbps / 1000} Mbps`);
     const codec = button("setting-codec", shell.settings.codec.toUpperCase());
     const hdr = button("setting-hdr", shell.settings.hdr ? "HDR10 on" : "HDR10 off");
     if (!hdrAllowed(shell.settings)) {
       hdr.disabled = true;
     }
-    [resolution, fps, bitrate, codec, hdr].forEach((node, index) => {
+    const rows = [resolution, fps, bitrate, codec, hdr];
+    const audioChoices = selectableAudio(extensions);
+    if (audioChoices.length > 1) {
+      rows.push(button("setting-audio", audioLabel(fitAudio(shell.settings.audioChannels, extensions))));
+    }
+    rows.forEach((node, index) => {
       field(items, node.id, index + 1, 0);
       page.append(node);
     });
     if (modes.some((mode) => mode.experimental && mode.width === shell.settings.width)) {
       page.append(el("p", "muted", "1440p is experimental on this TV."));
     }
+    if (!hdrAllowed(shell.settings)) {
+      page.append(el("p", "muted", "HDR needs HEVC or AV1 at 1080p or higher."));
+    }
     page.dataset.resolutions = RESOLUTIONS.map((item) => item.label).join(",");
-    page.dataset.rates = FRAME_RATES.join(",");
+    page.dataset.rates = shownRates.join(",");
     page.dataset.bitrates = BITRATES_KBPS.join(",");
-    page.dataset.codecs = CODECS.join(",");
+    page.dataset.codecs = codecs.join(",");
+    page.dataset.audio = audioChoices.join(",");
   }
 
   if (shell.screen === "stream") {
