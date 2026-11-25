@@ -8,7 +8,7 @@ import { keyboardReachable } from "../src/ui/focus.ts";
 import { focusMap } from "../src/ui/view.ts";
 import { text } from "../src/ui/strings.ts";
 import { endpointForSave, hostKey, parseTypedEndpoint, portDigits } from "../src/domain/ids.ts";
-import { shouldDiscover } from "../src/net/discover.ts";
+import { shouldDiscover, shouldRefreshSaved } from "../src/net/discover.ts";
 import {
   browserWatchSocket,
   createPresenceWatcher,
@@ -176,6 +176,15 @@ test("first launch with no PCs runs discovery, and a known-offline PC does too",
   assert.equal(shouldDiscover({ saved: 2, screen: "hosts", offline: 1, streaming: false }), true);
   assert.equal(shouldDiscover({ saved: 2, screen: "library", offline: 1, streaming: false }), false);
   assert.equal(shouldDiscover({ saved: 0, screen: "hosts", offline: 0, streaming: true }), false);
+});
+
+test("a saved PC is refreshed until the host answers", () => {
+  assert.equal(shouldRefreshSaved({ saved: 1, confirmedOnline: 0, streaming: false, bridgeReady: true }), true);
+  assert.equal(shouldRefreshSaved({ saved: 1, confirmedOnline: 1, streaming: false, bridgeReady: true }), false);
+  assert.equal(shouldRefreshSaved({ saved: 2, confirmedOnline: 1, streaming: false, bridgeReady: true }), true);
+  assert.equal(shouldRefreshSaved({ saved: 1, confirmedOnline: 0, streaming: true, bridgeReady: true }), false);
+  assert.equal(shouldRefreshSaved({ saved: 0, confirmedOnline: 0, streaming: false, bridgeReady: true }), false);
+  assert.equal(shouldRefreshSaved({ saved: 1, confirmedOnline: 0, streaming: false, bridgeReady: false }), false);
 });
 
 test("a moved PC keeps its pairing, its id, and the last app", () => {

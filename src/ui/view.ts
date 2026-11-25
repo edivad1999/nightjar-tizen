@@ -776,6 +776,9 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   if (shell.screen === "hosts") {
     const association = shell.association;
     page.append(el("h2", "title", say(shell, "pcs")));
+    if (shell.launchDebug && shell.presenceLog) {
+      page.append(el("p", "launch-debug", shell.presenceLog));
+    }
     if (shell.hosts.length === 0) {
       const actions = el("div", "action-grid");
       actions.append(

@@ -11,6 +11,7 @@ import {
   exitPrompt,
   exitStep,
   firstRunLocale,
+  networkCameUp,
   pinBound,
   readModel,
   registerTvKeys,
@@ -196,6 +197,15 @@ test("HDR is disabled when the panel or the decoder says no", async () => {
     setTvHdrSupport(null);
   }
   assert.equal(hdrAllowed({ width: 1920, height: 1080, codec: "hevc" }), true);
+});
+
+test("a gateway or internet connection counts as the network coming up", () => {
+  assert.equal(networkCameUp(0), true);
+  assert.equal(networkCameUp(4), true);
+  assert.equal(networkCameUp(1), false);
+  assert.equal(networkCameUp(5), false);
+  assert.equal(networkCameUp(9), false);
+  assert.equal(networkCameUp("4"), false);
 });
 
 test("the first-run locale follows an it-IT system locale", () => {

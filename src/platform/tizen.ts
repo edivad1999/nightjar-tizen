@@ -46,6 +46,13 @@ export function applyHide(
   return hideAction(input.streaming, input.quitOnDisconnect, input.recovering === true);
 }
 
+export const NETWORK_INTERNET_CONNECTED = 0;
+export const NETWORK_GATEWAY_CONNECTED = 4;
+
+export function networkCameUp(state: unknown): boolean {
+  return state === NETWORK_INTERNET_CONNECTED || state === NETWORK_GATEWAY_CONNECTED;
+}
+
 export function resumeAction(online: boolean): "reconnect" | "continue" {
   return online ? "continue" : "reconnect";
 }
