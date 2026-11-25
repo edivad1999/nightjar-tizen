@@ -451,6 +451,20 @@ button, input { font-family: inherit; }
 
 .chrome-right .launch-debug { grid-row: 3; align-self: end; }
 
+.mouse-debug {
+  grid-row: 2;
+  align-self: end;
+  margin: 0;
+  width: min(420px, 100%);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(22, 28, 26, 0.92);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 20px;
+  line-height: 1.35;
+}
+
 .stream-chrome > .stream-hint {
   position: static;
   grid-column: 1;

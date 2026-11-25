@@ -127,6 +127,13 @@ test("library play reaches a playing video and a stereo answer", { timeout: 60_0
       lastAppByAddress: {},
       quitOnDisconnect: {},
     }));
+    const frames: string[] = [];
+    (window as unknown as { inputFrames: string[] }).inputFrames = frames;
+    const send = RTCDataChannel.prototype.send;
+    RTCDataChannel.prototype.send = function (data) {
+      if (this.label === "input") frames.push(String(data));
+      Reflect.apply(send, this, [data]);
+    };
   }, mock.port);
   try {
     await page.goto(`http://127.0.0.1:${sitePort}/index.html`, { waitUntil: "domcontentloaded" });
@@ -156,6 +163,48 @@ test("library play reaches a playing video and a stereo answer", { timeout: 60_0
     assert.match(String(mock.seen.answers[0] ?? ""), /stereo=1/);
     assert.equal(/color-space/i.test(String(mock.seen.answers[0] ?? "")), false);
     assert.equal(mock.seen.errors.some((error) => error.requestType === "start-session"), false);
+    const delivered = await page.evaluate(() => {
+      const frames = (window as unknown as { inputFrames: string[] }).inputFrames;
+      document.dispatchEvent(new MouseEvent("mousemove", {
+        bubbles: true,
+        buttons: 0,
+        clientX: 10,
+        clientY: 10,
+      }));
+      document.dispatchEvent(new MouseEvent("mousemove", {
+        bubbles: true,
+        buttons: 0,
+        clientX: 25,
+        clientY: 18,
+      }));
+      document.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerType: "mouse",
+        button: 0,
+        buttons: 0,
+        clientX: 100,
+        clientY: 80,
+      }));
+      document.dispatchEvent(new PointerEvent("pointermove", {
+        bubbles: true,
+        pointerType: "mouse",
+        buttons: 0,
+        clientX: 140,
+        clientY: 60,
+        movementX: 40,
+        movementY: -20,
+      }));
+      return {
+        frames: [...frames],
+        line: document.querySelector("#mouse-debug")?.textContent ?? "",
+      };
+    });
+    assert.equal(delivered.frames.filter((line) => line.includes('"type":"mouse-move"')).length >= 2, true);
+    assert.equal(
+      delivered.frames.some((line) => line.includes('"type":"mouse-button"') && line.includes('"button":0')),
+      true,
+    );
+    assert.match(delivered.line, /mouse fallback in \d+ sent [1-9]/);
   } finally {
     await browser.close();
     await mock.close();

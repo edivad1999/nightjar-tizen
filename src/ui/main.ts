@@ -36,8 +36,8 @@ import {
   type PadEffect,
   type PadSnapshot,
 } from "../input/pads.ts";
-import { armKeyboard, keyboardIsActive, localPointer, routeStreamKey, type KeyboardLatch, type Point } from "../input/local-input.ts";
-import { InputSession, Wheel, keyMessage, textMessages } from "../protocol/input.ts";
+import { acceptPointerSource, armKeyboard, keyboardIsActive, localPointer, mouseMode, mouseStatusLine, pointerEdge, routeStreamKey, type KeyboardLatch, type MouseMode, type Point } from "../input/local-input.ts";
+import { InputSession, Wheel, keyMessage, nextButtonMask, textMessages } from "../protocol/input.ts";
 import { DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, stepWakePlay, type WakePlay } from "../protocol/wol.ts";
 import { openArtworkCache, type CachedApp } from "../storage/artwork-cache.ts";
@@ -51,7 +51,7 @@ import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import { text } from "./strings.ts";
 import { CONTROLS_KEY, controlPrefs, installControlPrefs, loadControlPrefs, storedControlPrefs, toggleControl } from "./controls-settings.ts";
-import { applyLaunchPanel, applyStreamHint, applyStreamView, mountLaunchPanel, mountStreamHint, mountStreamOverlay, render, setStreamChromeParked, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
+import { applyLaunchPanel, applyMouseDebug, applyStreamHint, applyStreamView, mountLaunchPanel, mountMouseDebug, mountStreamHint, mountStreamOverlay, render, setStreamChromeParked, setStreamMenuHealth, setStreamOverlayVisible, MENU_LOGS_ID, MENU_STATS_ID } from "./view.ts";
 import { openTvStore, type TvFilesystem, type TvPreference } from "../platform/storage.ts";
 import {
   applyHide,
@@ -286,6 +286,11 @@ const streamInput = new InputSession((text) => peer.sendInput(text));
 const wheel = new Wheel();
 let pointerButtons = 0;
 let pointerPoint: Point | null = null;
+let buttonLive = false;
+let pointerThisTurn = false;
+let mouseSeen = 0;
+let mouseSent = 0;
+let reportedMouse: MouseMode | null = null;
 let keyboardLatch: KeyboardLatch | null = null;
 let capturingInput = false;
 const pads = createPads();
@@ -311,6 +316,7 @@ const artworkCache = openArtworkCache();
 let artworkStamp = "";
 const launchTrace = createLaunchTrace();
 const launchPanel = mountLaunchPanel(overlayNodes.launchParent);
+const mouseDebug = mountMouseDebug(overlayNodes.launchParent);
 const streamHint = mountStreamHint(overlayNodes.hintParent);
 const pendingLaunchLogs: string[] = [];
 let liveSince: number | null = null;
@@ -350,6 +356,7 @@ function syncChrome(now = performance.now()): void {
     enabled: shell.launchDebug,
     onStream: shell.screen === "stream",
   }));
+  publishMouse();
   setStreamChromeParked(shell.screen === "stream" && shell.menuOpen);
   if (chromeTimer !== null) {
     window.clearTimeout(chromeTimer);
@@ -445,11 +452,33 @@ function releaseStreamInput(): void {
   streamInput.releaseAll();
   pointerButtons = 0;
   pointerPoint = null;
+  buttonLive = false;
+  mouseSeen = 0;
+  mouseSent = 0;
   keyboardLatch = null;
   wheel.reset();
   if (document.pointerLockElement) {
     document.exitPointerLock();
   }
+}
+
+function publishMouse(): void {
+  const mode = mouseMode({
+    enabled: controlPrefs().localInput,
+    capturing: streamCapturing(),
+    locked: document.pointerLockElement === streamVideo,
+  });
+  const onStream = shell.screen === "stream" && shell.launchDebug;
+  applyMouseDebug(mouseDebug, mouseStatusLine(mode, mouseSeen, mouseSent), onStream);
+  if (!onStream) {
+    reportedMouse = null;
+    return;
+  }
+  if (mode === reportedMouse) {
+    return;
+  }
+  reportedMouse = mode;
+  noteLaunch("mouse", mode);
 }
 
 function paint(): void {
@@ -1316,44 +1345,89 @@ document.addEventListener("keyup", (event) => {
   }
 });
 
-function onPointer(event: PointerEvent): void {
-  if (event.pointerType === "touch" || event.pointerType === "pen") {
+function takePointer(event: MouseEvent, source: "pointer" | "mouse"): void {
+  if (!acceptPointerSource(source, pointerThisTurn)) {
     return;
   }
-  if (!controlPrefs().localInput || !streamCapturing()) {
+  if (shell.screen !== "stream") {
     return;
   }
-  if (event.type === "pointerdown" && document.pointerLockElement !== streamVideo) {
+  const pointerType = source === "pointer" ? (event as PointerEvent).pointerType : "";
+  if (pointerType === "touch" || pointerType === "pen") {
+    return;
+  }
+  const edge = pointerEdge(event.type);
+  if (!edge) {
+    return;
+  }
+  mouseSeen += 1;
+  const next = nextButtonMask(pointerButtons, buttonLive, {
+    edge,
+    button: edge === "move" ? null : event.button,
+    buttons: typeof event.buttons === "number" ? event.buttons : null,
+  });
+  buttonLive = next.live;
+  const mode = mouseMode({
+    enabled: controlPrefs().localInput,
+    capturing: streamCapturing(),
+    locked: document.pointerLockElement === streamVideo,
+  });
+  if (edge === "down" && mode !== "none" && document.pointerLockElement !== streamVideo) {
     try {
-      const lock = streamVideo.requestPointerLock();
-      void Promise.resolve(lock).catch(() => undefined);
+      void Promise.resolve(streamVideo.requestPointerLock()).catch(() => undefined);
     } catch {
-      // Lock can be missing on this TV. Later samples use client position as a delta.
+      /* The runtime threw instead of returning a refused promise. */
     }
   }
-  const result = localPointer({
-    locked: document.pointerLockElement === streamVideo,
-    pointerType: event.pointerType,
-    movementX: event.movementX,
-    movementY: event.movementY,
-    clientX: event.clientX,
-    clientY: event.clientY,
-    buttons: event.buttons,
-    previousButtons: pointerButtons,
-    previousPoint: pointerPoint,
-    swapButtons: controlPrefs().swapMouseButtons,
-  });
-  pointerButtons = event.buttons;
-  pointerPoint = result.point;
-  for (const message of result.messages) {
-    streamInput.send(message);
+  if (mode !== "none") {
+    const result = localPointer({
+      locked: mode === "locked",
+      pointerType: pointerType || undefined,
+      movementX: event.movementX,
+      movementY: event.movementY,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      buttons: next.mask,
+      previousButtons: pointerButtons,
+      previousPoint: pointerPoint,
+      swapButtons: controlPrefs().swapMouseButtons,
+    });
+    pointerPoint = result.point;
+    for (const message of result.messages) {
+      if (streamInput.send(message)) {
+        mouseSent += 1;
+      }
+    }
   }
+  pointerButtons = next.mask;
+  publishMouse();
+}
+
+function onPointer(event: PointerEvent): void {
+  pointerThisTurn = true;
+  queueMicrotask(() => {
+    pointerThisTurn = false;
+  });
+  takePointer(event, "pointer");
+}
+
+function onMouse(event: MouseEvent): void {
+  takePointer(event, "mouse");
 }
 
 document.addEventListener("pointerdown", onPointer);
 document.addEventListener("pointermove", onPointer);
 document.addEventListener("pointerup", onPointer);
 document.addEventListener("pointercancel", onPointer);
+document.addEventListener("mousedown", onMouse);
+document.addEventListener("mousemove", onMouse);
+document.addEventListener("mouseup", onMouse);
+document.addEventListener("pointerlockchange", () => {
+  publishMouse();
+});
+document.addEventListener("pointerlockerror", () => {
+  publishMouse();
+});
 document.addEventListener("wheel", (event) => {
   if (!controlPrefs().localInput || !streamCapturing()) {
     return;

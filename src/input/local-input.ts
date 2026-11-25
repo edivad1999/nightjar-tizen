@@ -1,4 +1,4 @@
-import { buttonChanges, mouseMoveMessage, type InputMessage } from "../protocol/input.ts";
+import { buttonChanges, mouseMoveMessage, type InputMessage, type PointerEdge } from "../protocol/input.ts";
 import { isStreamMenuBack, streamKeyDecision, type KeySample } from "../ui/keys.ts";
 
 export type Point = { x: number; y: number };
@@ -45,6 +45,41 @@ export function localPointer(sample: LocalMotion): LocalMotionResult {
   }
   messages.push(...buttonChanges(sample.previousButtons, sample.buttons, sample.swapButtons));
   return { messages, point };
+}
+
+export type MouseMode = "locked" | "fallback" | "none";
+
+export function mouseMode(input: { enabled: boolean; capturing: boolean; locked: boolean }): MouseMode {
+  if (!input.enabled || !input.capturing) {
+    return "none";
+  }
+  return input.locked ? "locked" : "fallback";
+}
+
+export function mouseStatusLine(mode: MouseMode, seen: number, sent: number): string {
+  return `mouse ${mode} in ${seen} sent ${sent}`;
+}
+
+export function pointerEdge(type: string): PointerEdge | null {
+  switch (type) {
+    case "pointerdown":
+    case "mousedown":
+      return "down";
+    case "pointermove":
+    case "mousemove":
+      return "move";
+    case "pointerup":
+    case "mouseup":
+      return "up";
+    case "pointercancel":
+      return "cancel";
+    default:
+      return null;
+  }
+}
+
+export function acceptPointerSource(source: "pointer" | "mouse", pointerThisTurn: boolean): boolean {
+  return source === "pointer" || !pointerThisTurn;
 }
 
 const REMOTE_NAMES = new Set([

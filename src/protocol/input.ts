@@ -103,6 +103,29 @@ export function buttonChanges(previous: number, current: number, swapButtons = f
   return out;
 }
 
+export type PointerEdge = "down" | "move" | "up" | "cancel";
+
+export function nextButtonMask(
+  previous: number,
+  live: boolean,
+  reading: { edge: PointerEdge; button: number | null; buttons: number | null },
+): { mask: number; live: boolean } {
+  const seen = live || (reading.buttons !== null && reading.buttons !== 0);
+  if (reading.edge === "cancel") {
+    return { mask: seen && reading.buttons !== null ? reading.buttons : 0, live: seen };
+  }
+  if (seen && reading.buttons !== null) {
+    return { mask: reading.buttons, live: true };
+  }
+  const index = reading.button;
+  if (reading.edge === "move" || index === null || !Number.isInteger(index) || index < 0 || index > 4) {
+    return { mask: previous, live: seen };
+  }
+  const bit = BUTTON_BITS[index] ?? 0;
+  const mask = reading.edge === "down" ? (previous | bit) : (previous & ~bit);
+  return { mask, live: seen };
+}
+
 export type PointerSample = {
   locked: boolean;
   pointerType?: string;

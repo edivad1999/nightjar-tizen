@@ -27,4 +27,5 @@
                    encryption="disable"
                    install-location="auto"
                    hwkey-event="enable"/>
+    <tizen:setting pointing-device-support="enable"/>
 </widget>
