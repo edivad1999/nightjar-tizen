@@ -4,7 +4,7 @@ import { DEFAULT_SETTINGS, STEREO_EXTENSIONS } from "../src/domain/settings.ts";
 import { initialLink, step, type LinkState, type StepContext } from "../src/protocol/machine.ts";
 import { parseServerMessage, type AppEntry, type ServerMessage } from "../src/protocol/parse.ts";
 import { applyHide } from "../src/platform/tizen.ts";
-import { initialShell, reduceShell, runningAppId, type Shell } from "../src/ui/model.ts";
+import { activateFocused, initialShell, reduceShell, runningAppId, type Shell } from "../src/ui/model.ts";
 import type { SavedHost } from "../src/storage/persist.ts";
 
 const context: StepContext = {
@@ -164,6 +164,60 @@ test("a stopped host game is not still running when the app list is stale", () =
   assert.equal(runningAppId(shell), null);
   const played = reduceShell(reduceShell(shell, { kind: "open-game", appId: "hades" }), { kind: "request-play" });
   assert.deepEqual(played.command, { kind: "start-session", appId: "hades" });
+});
+
+test("launching the running app resumes it and launching another asks to switch", () => {
+  const shell = withApps([
+    app("desktop", "Desktop", true),
+    app("hades", "Hades", false),
+  ], "desktop");
+  const same = reduceShell(reduceShell(shell, { kind: "open-game", appId: "desktop" }), { kind: "request-play" });
+  assert.deepEqual(same.command, { kind: "start-session", appId: "desktop" });
+  assert.equal(same.confirmAppId, null);
+  const other = reduceShell(reduceShell(shell, { kind: "open-game", appId: "hades" }), { kind: "request-play" });
+  assert.equal(other.command, null);
+  assert.equal(other.confirmAppId, "hades");
+  const confirmed = reduceShell(other, { kind: "request-play" });
+  assert.deepEqual(confirmed.command, { kind: "switch-session", appId: "hades" });
+});
+
+test("nothing running starts the chosen game", () => {
+  const shell = withApps([
+    app("desktop", "Desktop", false),
+    app("hades", "Hades", false),
+  ], null);
+  const played = reduceShell(reduceShell(shell, { kind: "open-game", appId: "hades" }), { kind: "request-play" });
+  assert.deepEqual(played.command, { kind: "start-session", appId: "hades" });
+  assert.equal(played.confirmAppId, null);
+});
+
+test("leaving Desktop keeps the host's running app, so the next game switches", () => {
+  let shell = withApps([
+    app("desktop", "Desktop", false),
+    app("hades", "Hades", false),
+  ], null);
+  let link = shell.link;
+  link = step(link, { kind: "play", appId: "desktop", video: DEFAULT_SETTINGS }, context).state;
+  link = step(link, {
+    kind: "server",
+    message: server('{"version":2,"type":"session-status","state":"starting-webrtc","sessionId":3}'),
+  }, context).state;
+  link = step(link, { kind: "disconnect-stream" }, context).state;
+  shell = reduceShell(shell, { kind: "link", link });
+  assert.equal(runningAppId(shell), "desktop");
+  const next = reduceShell(reduceShell(shell, { kind: "open-game", appId: "hades" }), { kind: "request-play" });
+  assert.equal(next.confirmAppId, "hades");
+  const confirmed = reduceShell(next, { kind: "request-play" });
+  assert.deepEqual(confirmed.command, { kind: "switch-session", appId: "hades" });
+  const again = reduceShell(reduceShell(shell, { kind: "open-game", appId: "desktop" }), { kind: "request-play" });
+  assert.deepEqual(again.command, { kind: "start-session", appId: "desktop" });
+});
+
+test("stream menu quit stops the host app and disconnect leaves it running", () => {
+  const shell = reduceShell(withLiveStream(), { kind: "back" });
+  assert.equal(shell.menuOpen, true);
+  assert.deepEqual(activateFocused(shell, "menu-quit").command, { kind: "stop-host-session" });
+  assert.deepEqual(activateFocused(shell, "menu-disconnect").command, { kind: "stop-session" });
 });
 
 test("resume on the game page returns to the live picture", () => {
