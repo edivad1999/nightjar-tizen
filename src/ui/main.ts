@@ -19,6 +19,7 @@ import {
 } from "../domain/settings.ts";
 import { BrowserPeer } from "../net/browser-peer.ts";
 import { SignallingClient, type MediaPeer } from "../net/client.ts";
+import { QUIT_GIVE_UP_MS } from "../protocol/machine.ts";
 import { CLIENT_LOG_FLUSH_MS } from "../net/client-log.ts";
 import { DISCOVERY_TIMEOUT_MS, hostsFromReplies, shouldDiscover, type BroadcastReply } from "../net/discover.ts";
 import { browserWatchSocket, createPresenceWatcher } from "../net/presence.ts";
@@ -599,6 +600,7 @@ const client = new SignallingClient(peer satisfies MediaPeer, {
     const notice = pairNotice;
     pairNotice = null;
     apply({ kind: "link", link, notice });
+    watchQuit(link);
     flushLaunchLogs();
     if (shouldAutoPair({
       previousPhase: previous,
@@ -896,7 +898,32 @@ function sendCommand(command: SessionCommand): void {
     client.intent({ kind: "disconnect-stream" });
     return;
   }
+  if (command.kind === "dismiss-quit") {
+    client.intent({ kind: "dismiss-quit" });
+    return;
+  }
   client.intent({ kind: "quit-game" });
+}
+
+let quitTimer: ReturnType<typeof setTimeout> | null = null;
+
+function watchQuit(link: { quit: { phase: string } | null }): void {
+  if (link.quit?.phase !== "waiting") {
+    if (quitTimer !== null) {
+      clearTimeout(quitTimer);
+      quitTimer = null;
+    }
+    return;
+  }
+  if (quitTimer !== null) {
+    return;
+  }
+  quitTimer = setTimeout(() => {
+    quitTimer = null;
+    if (client.link.quit?.phase === "waiting") {
+      client.intent({ kind: "quit-timeout" });
+    }
+  }, QUIT_GIVE_UP_MS);
 }
 
 function commitLibrary(id: string): void {

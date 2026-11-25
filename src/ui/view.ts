@@ -387,6 +387,18 @@ function appRunning(shell: Shell, app: AppEntry): boolean {
 }
 
 export function focusMap(shell: Shell): FocusItem[] {
+  if (shell.link.quit?.phase === "waiting") {
+    return [];
+  }
+  if (shell.link.quit?.phase === "failed") {
+    return [{ id: "dismiss-quit", row: 0, col: 0 }];
+  }
+  if (shell.quitAsk) {
+    return [
+      { id: "cancel-quit", row: 0, col: 0 },
+      { id: "confirm-quit", row: 0, col: 1 },
+    ];
+  }
   if (shell.confirmAppId && (shell.screen === "library" || shell.screen === "game")) {
     return [
       { id: "confirm-play", row: 0, col: 0 },
@@ -544,6 +556,7 @@ export function focusMap(shell: Shell): FocusItem[] {
     let row = 1;
     if (continueAppId(shell)) {
       place(items, "continue-last", row, 0);
+      place(items, "quit-running", row, 1);
       row += 1;
     }
     place(items, "library-sort", row, 0);
@@ -975,13 +988,14 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     const continueId = continueAppId(shell);
     const continueApp = appById(shell, continueId);
     if (continueApp) {
-      const running = appRunning(shell, continueApp);
-      const card = button(
+      const row = el("div", "row");
+      row.append(button(
         "continue-last",
-        `${running ? say(shell, "resume") : say(shell, "continue")} · ${continueApp.title}`,
+        `${say(shell, "resume")} · ${continueApp.title}`,
         "button primary continue-card",
-      );
-      page.append(card);
+      ));
+      row.append(button("quit-running", say(shell, "quitGame"), "button danger"));
+      page.append(row);
     }
     const tools = el("div", "shelf");
     tools.append(
@@ -1034,7 +1048,7 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       }
       copy.append(button("play-game", running ? say(shell, "resume") : say(shell, "play"), "button primary"));
       if (running) {
-        copy.append(button("quit-game", say(shell, "quitGame")));
+        copy.append(button("quit-game", say(shell, "quitGame"), "button danger"));
       }
       copy.append(button("favourite-game", say(shell, appIsFavourite(shell, app.id) ? "favouriteRemove" : "favouriteAdd")));
       copy.append(button("hide-game", say(shell, appIsHidden(shell, app.id) ? "showGame" : "hideGame")));
@@ -1135,7 +1149,7 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
       menu.append(button(MENU_STATS_ID, performanceShown ? say(shell, "hideOverlay") : say(shell, "showOverlay")));
       menu.append(button(MENU_LOGS_ID, logsOn ? say(shell, "stopLogs") : say(shell, "sendLogs")));
       menu.append(button("menu-disconnect", say(shell, "disconnect")));
-      menu.append(button("menu-quit", say(shell, "quitGame")));
+      menu.append(button("menu-quit", say(shell, "quitGame"), "button danger"));
       const appId = streamingAppId(shell) ?? shell.selectedAppId;
       const quits = quitOnDisconnectFor(shell, appId);
       menu.append(el("p", "muted", quits ? say(shell, "disconnectQuits") : say(shell, "disconnectKeeps")));
@@ -1169,6 +1183,36 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     dialog.append(el("h2", "title", say(shell, "openingGame", { title: app?.title ?? shell.countdown.appId })));
     dialog.append(el("p", "countdown-num", say(shell, "countdownSeconds", { seconds: String(shell.countdown.seconds) })));
     dialog.append(button("countdown-cancel", say(shell, "cancel"), "button primary"));
+    scrim.append(dialog);
+    page.append(scrim);
+  }
+
+  const quit = shell.link.quit;
+  if (shell.quitAsk || quit) {
+    const appId = quit?.appId || shell.quitAsk || "";
+    const title = appById(shell, appId)?.title ?? appId;
+    const scrim = el("div", "scrim");
+    const dialog = el("div", "dialog");
+    dialog.role = "dialog";
+    dialog.setAttribute("aria-modal", "true");
+    if (quit?.phase === "waiting") {
+      dialog.append(el("h2", "title", say(shell, "quittingGame", { title })));
+    } else if (quit?.phase === "failed") {
+      dialog.append(el("h2", "title", say(shell, "quitFailed")));
+      if (quit.message) {
+        dialog.append(el("p", "lede", quit.message));
+      }
+      dialog.append(button("dismiss-quit", say(shell, "back"), "button primary"));
+    } else {
+      dialog.append(el("h2", "title", say(shell, "confirmQuit", { title })));
+      dialog.append(el("p", "lede", say(shell, "confirmQuitBody")));
+      const actions = el("div", "row");
+      actions.append(
+        button("cancel-quit", say(shell, "cancel"), "button primary"),
+        button("confirm-quit", say(shell, "quitGame"), "button danger"),
+      );
+      dialog.append(actions);
+    }
     scrim.append(dialog);
     page.append(scrim);
   }

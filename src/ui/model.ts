@@ -83,7 +83,8 @@ export type SessionCommand =
   | { kind: "start-session"; appId: string }
   | { kind: "switch-session"; appId: string }
   | { kind: "stop-session" }
-  | { kind: "stop-host-session" };
+  | { kind: "stop-host-session" }
+  | { kind: "dismiss-quit" };
 
 export type Shell = {
   screen: AppScreen;
@@ -92,6 +93,7 @@ export type Shell = {
   hosts: SavedHost[];
   activeAddress: string | null;
   confirmAppId: string | null;
+  quitAsk: string | null;
   toast: Toast;
   association: Association;
   focusId: string | null;
@@ -154,6 +156,9 @@ export type ShellAction =
   | { kind: "finish-pair" }
   | { kind: "confirm-play"; appId: string }
   | { kind: "cancel-confirm" }
+  | { kind: "ask-quit" }
+  | { kind: "confirm-quit" }
+  | { kind: "cancel-quit" }
   | { kind: "toggle-menu" }
   | { kind: "request-play" }
   | { kind: "toggle-more" }
@@ -162,7 +167,6 @@ export type ShellAction =
   | { kind: "toggle-launch-debug" }
   | { kind: "remember-last"; appId: string }
   | { kind: "disconnect" }
-  | { kind: "quit-host" }
   | { kind: "consume-command" }
   | { kind: "cycle-setting"; setting: "resolution" | "bitrate" }
   | { kind: "toggle-sort" }
@@ -192,6 +196,7 @@ export function initialShell(): Shell {
     hosts: [],
     activeAddress: null,
     confirmAppId: null,
+    quitAsk: null,
     toast: { kind: "hidden" },
     association: { kind: "browse" },
     focusId: "add-host",
@@ -515,11 +520,16 @@ export function continueAppId(shell: Shell): string | null {
   if (running && apps.some((app) => app.id === running)) {
     return running;
   }
-  const last = lastAppId(shell);
-  if (last && apps.some((app) => app.id === last)) {
-    return last;
-  }
   return null;
+}
+
+export function libraryEntryFocus(shell: Shell): string {
+  if (continueAppId(shell)) {
+    return "continue-last";
+  }
+  const lists = libraryLists(shell);
+  const first = lists.favourites[0] ?? lists.games[0];
+  return first ? `game-${first.id}` : "library-sort";
 }
 
 function libraryKey(shell: Shell): string | null {
@@ -745,7 +755,21 @@ function addressKey(entry: Extract<Association, { kind: "address" }>, key: strin
   return { ...entry, draft: entry.draft + key, problem: "none" };
 }
 
+function askQuit(shell: Shell): Shell {
+  if (shell.link.quit?.phase === "waiting") {
+    return shell;
+  }
+  const appId = runningAppId(shell);
+  if (!appId) {
+    return shell;
+  }
+  return { ...shell, quitAsk: appId, command: null, focusId: "cancel-quit" };
+}
+
 function requestPlay(shell: Shell): Shell {
+  if (shell.quitAsk || shell.link.quit?.phase === "waiting") {
+    return shell;
+  }
   const appId = shell.selectedAppId;
   const snapshot = snapshotOf(shell);
   if (!appId || !snapshot) {
@@ -945,11 +969,17 @@ function cycleResolution(shell: Shell): Shell {
 export function reduceShell(shell: Shell, action: ShellAction): Shell {
   switch (action.kind) {
     case "back": {
+      if (shell.link.quit?.phase === "waiting") {
+        return shell;
+      }
+      if (shell.quitAsk || shell.link.quit?.phase === "failed") {
+        return reduceShell(shell, { kind: "cancel-quit" });
+      }
       if (shell.countdown) {
-        return { ...shell, countdown: null, launchSpent: true, focusId: "continue-last" };
+        return { ...shell, countdown: null, launchSpent: true, focusId: libraryEntryFocus(shell) };
       }
       if (shell.startError) {
-        return { ...shell, startError: null, launchSpent: true, focusId: shell.screen === "game" ? "play-game" : "continue-last" };
+        return { ...shell, startError: null, launchSpent: true, focusId: shell.screen === "game" ? "play-game" : libraryEntryFocus(shell) };
       }
       if (shell.screen === "stream" && shell.menuOpen) {
         return { ...shell, menuOpen: false };
@@ -961,7 +991,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         return { ...shell, confirmAppId: null, command: null, focusId: "play-game" };
       }
       if (shell.screen === "game") {
-        return { ...shell, screen: "library", focusId: "continue-last", command: null };
+        return { ...shell, screen: "library", focusId: libraryEntryFocus(shell), command: null };
       }
       const association = shell.association;
       if (association.kind === "forget") {
@@ -1129,7 +1159,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.link.phase.kind !== "online" || shell.association.kind !== "pair" || shell.association.view.kind !== "paired") {
         return shell;
       }
-      return { ...shell, screen: "library", association: { kind: "browse" }, menuOpen: false, focusId: "continue-last", launchSpent: true };
+      return { ...shell, screen: "library", association: { kind: "browse" }, menuOpen: false, focusId: libraryEntryFocus(shell), launchSpent: true };
     case "open-settings":
       return { ...shell, screen: "settings", menuOpen: false, focusId: "setting-resolution", confirmAppId: null, launchSpent: true };
     case "open-hosts":
@@ -1138,7 +1168,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.link.phase.kind !== "online" && appsFor(shell).length === 0) {
         return shell;
       }
-      return { ...shell, screen: "library", menuOpen: false, confirmAppId: null, focusId: "continue-last", launchSpent: true };
+      return { ...shell, screen: "library", menuOpen: false, confirmAppId: null, focusId: libraryEntryFocus(shell), launchSpent: true };
     case "open-game": {
       const known = appsFor(shell).some((app) => app.id === action.appId);
       if (!known) {
@@ -1175,7 +1205,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         association: entry,
       };
       if (next.link.phase.kind !== "online" && appsFor(next).length > 0) {
-        return { ...next, screen: "library", focusId: "continue-last" };
+        return { ...next, screen: "library", focusId: libraryEntryFocus(next) };
       }
       return next;
     }
@@ -1199,10 +1229,13 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       const catalogs = action.link.phase.kind === "online" ? rememberCatalog(shell, action.link.phase.snapshot) : shell.catalogs;
       const enteredPair = screen === "pair" && (shell.screen !== "pair" || shell.association.kind !== "pair" || (association.kind === "pair" && shell.association.kind === "pair" && shell.association.view.kind !== association.view.kind));
       const sameFailure = shell.startError?.code === startError?.code && shell.startError?.appId === startError?.appId;
+      const enteredLibrary = screen === "library" && shell.screen !== "library";
+      const linked = { ...shell, link: action.link, catalogs };
+      const quitAsk = shell.quitAsk && runningAppId(linked) === shell.quitAsk ? shell.quitAsk : null;
       const focusId = startError && !sameFailure
         ? "start-retry"
-        : screen === "library" && shell.screen !== "library"
-          ? "continue-last"
+        : enteredLibrary
+          ? libraryEntryFocus({ ...shell, link: action.link, catalogs })
           : enteredPair && association.kind === "pair"
             ? pairFocus(association.view)
             : shell.focusId;
@@ -1218,6 +1251,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         catalogs,
         startError,
         countdown: startError ? null : shell.countdown,
+        quitAsk,
       };
     }
     case "toast":
@@ -1251,8 +1285,25 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       return { ...shell, lastAppByAddress: remember(shell, action.appId), selectedAppId: shell.selectedAppId ?? action.appId };
     case "disconnect":
       return { ...shell, command: { kind: disconnectCommand(shell) } };
-    case "quit-host":
-      return { ...shell, command: { kind: "stop-host-session" } };
+    case "ask-quit":
+      return askQuit(shell);
+    case "confirm-quit": {
+      if (!shell.quitAsk || shell.link.quit?.phase === "waiting") {
+        return shell;
+      }
+      return { ...shell, quitAsk: null, command: { kind: "stop-host-session" }, focusId: null };
+    }
+    case "cancel-quit": {
+      const focusId = shell.screen === "game"
+        ? "play-game"
+        : shell.screen === "stream"
+          ? "menu-resume"
+          : libraryEntryFocus(shell);
+      if (shell.link.quit?.phase === "failed") {
+        return { ...shell, quitAsk: null, command: { kind: "dismiss-quit" }, focusId };
+      }
+      return { ...shell, quitAsk: null, command: null, focusId };
+    }
     case "consume-command":
       return { ...shell, command: null };
     case "cycle-setting": {
@@ -1317,7 +1368,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         focusId: "start-retry",
       };
     case "dismiss-start":
-      return { ...shell, startError: null, focusId: shell.screen === "game" ? "play-game" : "continue-last" };
+      return { ...shell, startError: null, focusId: shell.screen === "game" ? "play-game" : libraryEntryFocus(shell) };
     case "retry-start": {
       const failure = shell.startError;
       if (!failure) {
@@ -1329,14 +1380,15 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.launchSpent || shell.countdown) {
         return shell;
       }
-      if (shell.launch !== "last-game" || shell.startError) {
+      if (shell.launch !== "last-game" || shell.startError || shell.quitAsk || shell.link.quit) {
         return { ...shell, launchSpent: true };
       }
       if (shell.screen !== "library") {
         return shell;
       }
-      const appId = continueAppId(shell);
-      if (!appId) {
+      const appId = lastAppId(shell);
+      const running = runningAppId(shell);
+      if (!appId || !appsFor(shell).some((app) => app.id === appId) || (running !== null && running !== appId)) {
         return { ...shell, launchSpent: true };
       }
       return { ...shell, launchSpent: true, countdown: { appId, seconds: 3 }, focusId: "countdown-cancel" };
@@ -1352,7 +1404,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       return { ...shell, countdown: { appId: shell.countdown.appId, seconds: shell.countdown.seconds - 1 } };
     }
     case "cancel-countdown":
-      return { ...shell, countdown: null, launchSpent: true, focusId: "continue-last" };
+      return { ...shell, countdown: null, launchSpent: true, focusId: libraryEntryFocus(shell) };
     default: {
       const exhaustive: never = action;
       return exhaustive;
@@ -1368,6 +1420,10 @@ const libraryControls = new Set([
   "confirm-play",
   "cancel-play",
   "quit-game",
+  "quit-running",
+  "confirm-quit",
+  "cancel-quit",
+  "dismiss-quit",
   "leave-game",
   "menu-resume",
   "menu-disconnect",
@@ -1415,8 +1471,14 @@ export function activateFocused(shell: Shell, id: string): Shell {
   if (id === "cancel-play") {
     return reduceShell(shell, { kind: "cancel-confirm" });
   }
-  if (id === "quit-game" || id === "menu-quit") {
-    return reduceShell(shell, { kind: "quit-host" });
+  if (id === "quit-game" || id === "menu-quit" || id === "quit-running") {
+    return reduceShell(shell, { kind: "ask-quit" });
+  }
+  if (id === "confirm-quit") {
+    return reduceShell(shell, { kind: "confirm-quit" });
+  }
+  if (id === "cancel-quit" || id === "dismiss-quit") {
+    return reduceShell(shell, { kind: "cancel-quit" });
   }
   if (id === "menu-resume") {
     return reduceShell(shell, { kind: "toggle-menu" });

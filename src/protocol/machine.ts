@@ -22,6 +22,7 @@ import {
 
 export const HOST_CLOSE_REPLACED = 4000;
 export const HOST_CLOSE_POLICY = 1008;
+export const QUIT_GIVE_UP_MS = 20_000;
 
 const START_REQUESTS = new Set(["start-session", "switch-session", "answer"]);
 
@@ -73,6 +74,10 @@ export type Phase =
   | { kind: "disabled"; message: string }
   | { kind: "fault"; code: string; message: string };
 
+export type HostQuit =
+  | { phase: "waiting"; appId: string }
+  | { phase: "failed"; appId: string; message: string | null };
+
 export type LinkState = {
   credentials: Credentials | null;
   pairing: Pairing;
@@ -85,6 +90,7 @@ export type LinkState = {
   signedIn: boolean;
   launched: LaunchedStream | null;
   resume: LaunchedStream | null;
+  quit: HostQuit | null;
   phase: Phase;
 };
 
@@ -110,6 +116,8 @@ export type Intent =
   | { kind: "switch-app"; appId: string; video: StreamSettings }
   | { kind: "disconnect-stream" }
   | { kind: "quit-game" }
+  | { kind: "quit-timeout" }
+  | { kind: "dismiss-quit" }
   | { kind: "answer"; sessionId: number; sdp: string }
   | { kind: "candidate"; sessionId: number; candidate: string; mid: string }
   | { kind: "media-failed"; message: string };
@@ -138,6 +146,7 @@ export function initialLink(credentials: Credentials | null): LinkState {
     signedIn: false,
     launched: null,
     resume: null,
+    quit: null,
     phase: { kind: "idle" },
   };
 }
@@ -259,6 +268,30 @@ function statusForCurrentStream(stream: StreamPhase, sessionId: number | null, s
   return current === null;
 }
 
+function runningId(snapshot: HostSnapshot): string | null {
+  return snapshot.apps.find((app) => app.running)?.id ?? snapshot.runningAppId;
+}
+
+function settleQuit(state: LinkState, runningAppId: string | null): LinkState {
+  if (!state.quit || state.quit.appId === runningAppId) {
+    return state;
+  }
+  return { ...state, quit: null };
+}
+
+function acceptedRunning(snapshot: HostSnapshot): HostSnapshot {
+  if (snapshot.stream.kind === "none") {
+    return snapshot;
+  }
+  if (snapshot.stream.state !== "starting-webrtc" && snapshot.stream.state !== "streaming") {
+    return snapshot;
+  }
+  if (snapshot.stream.appId.length === 0) {
+    return snapshot;
+  }
+  return withRunning(snapshot, snapshot.stream.appId);
+}
+
 function applySession(snapshot: HostSnapshot, stateName: string, sessionId: number | null, message: string | null): HostSnapshot {
   if (stateName === "idle") {
     return { ...snapshot, sessionActive: false, stream: { kind: "none" }, banner: null };
@@ -327,6 +360,15 @@ function onError(state: LinkState, message: Extract<ServerMessage, { kind: "erro
   const snapshot = online(state);
   if (snapshot && message.requestType === "stop-session" && snapshot.stream.kind === "none" && snapshot.banner) {
     return same(state);
+  }
+  if (snapshot && message.requestType === "stop-host-session") {
+    if (state.quit?.phase !== "waiting") {
+      return replaceSnapshot(state, { ...snapshot, banner: message.message });
+    }
+    return replaceSnapshot(
+      { ...state, quit: { phase: "failed", appId: state.quit.appId, message: message.message } },
+      snapshot,
+    );
   }
   if (snapshot && snapshot.stream.kind !== "none" && START_REQUESTS.has(message.requestType)) {
     const appId = snapshot.stream.appId;
@@ -417,7 +459,7 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
       snapshot.sessionActive = message.sessionActive;
       snapshot.sunshineAvailable = next.sunshineAvailable;
       snapshot = withRunning(snapshot, message.runningAppId);
-      next = { ...next, pendingModes: null, pendingExtensions: null };
+      next = settleQuit({ ...next, pendingModes: null, pendingExtensions: null }, snapshot.runningAppId);
       const target = next.resume;
       if (target && message.runningAppId === target.appId) {
         snapshot.audioChannels = target.video.audioChannels;
@@ -456,7 +498,7 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
         }
       }
       const running = message.apps.find((app) => app.running)?.id ?? null;
-      return replaceSnapshot(state, { ...snapshot, apps: message.apps, artwork, runningAppId: running });
+      return replaceSnapshot(settleQuit(state, running), { ...snapshot, apps: message.apps, artwork, runningAppId: running });
     }
     case "app-artwork": {
       const snapshot = online(state);
@@ -477,14 +519,19 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
       if (!snapshot || !statusForCurrentStream(snapshot.stream, message.sessionId, message.state)) {
         return same(state);
       }
-      const applied = applySession(snapshot, message.state, message.sessionId, message.message);
+      const applied = acceptedRunning(applySession(snapshot, message.state, message.sessionId, message.message));
       const negotiated = message.video || message.audio
         ? { video: message.video, audio: message.audio }
         : snapshot.negotiated;
       const ended = applied.stream.kind === "none";
+      const effects: Effect[] = [];
+      if (ended && snapshot.stream.kind !== "none" && state.quit?.phase === "waiting") {
+        effects.push({ kind: "close-media" });
+      }
       return replaceSnapshot(
         { ...state, launched: ended ? null : state.launched, resume: ended ? null : state.resume },
         { ...applied, negotiated },
+        effects,
       );
     }
     case "host-session-status": {
@@ -492,17 +539,26 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
       if (!snapshot) {
         return same(state);
       }
-      const stopped = message.state === "stopped" || message.state === "failed";
-      const running = stopped ? null : (message.runningAppId ?? snapshot.runningAppId);
-      const marked = withRunning(snapshot, running);
-      return replaceSnapshot(
-        stopped ? { ...state, launched: null, resume: null } : state,
-        {
-          ...marked,
-          stream: stopped ? { kind: "none" } : snapshot.stream,
-          banner: message.state === "failed" ? (message.message ?? "The PC could not switch games") : snapshot.banner,
-        },
-      );
+      if (message.state === "stopped") {
+        return replaceSnapshot(
+          settleQuit({ ...state, launched: null, resume: null }, null),
+          { ...withRunning(snapshot, null), stream: { kind: "none" }, banner: null },
+          [{ kind: "close-media" }],
+        );
+      }
+      if (message.state === "failed") {
+        const running = message.runningAppId ?? runningId(snapshot);
+        const marked = withRunning(snapshot, running);
+        if (state.quit?.phase !== "waiting") {
+          return replaceSnapshot(state, { ...marked, banner: message.message ?? "The PC could not switch games" });
+        }
+        return replaceSnapshot(
+          { ...state, quit: { phase: "failed", appId: state.quit.appId, message: message.message } },
+          marked,
+        );
+      }
+      const running = message.runningAppId ?? runningId(snapshot);
+      return replaceSnapshot(settleQuit(state, running), withRunning(snapshot, running));
     }
     case "error":
       return onError(state, message, context);
@@ -650,18 +706,55 @@ export function step(state: LinkState, intent: Intent, context: StepContext): St
         [{ kind: "close-media" }, { kind: "send", text }],
       );
     }
-    case "disconnect-stream":
-    case "quit-game": {
+    case "disconnect-stream": {
       const cleared = { ...state, launched: null, resume: null };
       const snapshot = online(cleared);
       if (!snapshot) {
         return { state: cleared, effects: [] };
       }
-      const text = intent.kind === "disconnect-stream" ? stopSessionMessage() : stopHostSessionMessage();
       return replaceSnapshot(cleared, { ...snapshot, stream: { kind: "none" } }, [
-        { kind: "send", text },
+        { kind: "send", text: stopSessionMessage() },
         { kind: "close-media" },
       ]);
+    }
+    case "quit-game": {
+      const snapshot = online(state);
+      if (!snapshot) {
+        return same(state);
+      }
+      const appId = runningId(snapshot) ?? (snapshot.stream.kind === "none" ? null : snapshot.stream.appId);
+      if (!appId) {
+        return { state, effects: [{ kind: "send", text: stopHostSessionMessage() }] };
+      }
+      if (state.quit?.phase === "waiting" && state.quit.appId === appId) {
+        return same(state);
+      }
+      return replaceSnapshot(
+        { ...state, launched: null, resume: null, quit: { phase: "waiting", appId } },
+        snapshot,
+        [{ kind: "send", text: stopHostSessionMessage() }],
+      );
+    }
+    case "quit-timeout": {
+      if (state.quit?.phase !== "waiting") {
+        return same(state);
+      }
+      const quit = { phase: "failed" as const, appId: state.quit.appId, message: null };
+      const snapshot = online(state);
+      if (!snapshot) {
+        return { state: { ...state, quit }, effects: [] };
+      }
+      return replaceSnapshot({ ...state, quit }, snapshot);
+    }
+    case "dismiss-quit": {
+      if (state.quit?.phase !== "failed") {
+        return same(state);
+      }
+      const snapshot = online(state);
+      if (!snapshot) {
+        return { state: { ...state, quit: null }, effects: [] };
+      }
+      return replaceSnapshot({ ...state, quit: null }, { ...snapshot, banner: null });
     }
     case "answer": {
       const snapshot = online(state);

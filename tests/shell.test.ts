@@ -172,21 +172,41 @@ test("resume of the running game starts a session without switching", () => {
   assert.equal(shell.confirmAppId, null);
 });
 
-test("the last app opens again from the library", () => {
-  let shell = withApps([
+test("the library shows Resume only while the host reports that game", () => {
+  let quiet = withApps([
     app("celeste", "Celeste", false),
     app("hades", "Hades", false),
   ], null);
-  shell = reduceShell(shell, { kind: "open-game", appId: "hades" });
-  shell = reduceShell(shell, { kind: "request-play" });
-  assert.equal(shell.lastAppByAddress["192.168.1.20"], "hades");
-  shell = reduceShell(shell, { kind: "consume-command" });
+  quiet = reduceShell(quiet, { kind: "remember-last", appId: "hades" });
+  quiet = reduceShell(quiet, { kind: "note-played", appId: "hades", at: 50 });
+  quiet = reduceShell(quiet, { kind: "open-library" });
+  assert.equal(focusMap(quiet).some((item) => item.id === "continue-last"), false);
+  assert.notEqual(quiet.focusId, "continue-last");
+  const root = installDocument();
+  render(root as unknown as HTMLElement, quiet);
+  assert.equal(root.querySelector("#continue-last"), null);
+
+  let shell = withApps([
+    app("celeste", "Celeste", true),
+    app("hades", "Hades", false),
+  ], "celeste");
+  shell = reduceShell(shell, { kind: "remember-last", appId: "hades" });
   shell = reduceShell(shell, { kind: "open-library" });
+  assert.equal(shell.focusId, "continue-last");
   assert.ok(focusMap(shell).some((item) => item.id === "continue-last"));
-  shell = activateFocused(shell, "continue-last");
-  assert.equal(shell.screen, "game");
-  assert.equal(shell.selectedAppId, "hades");
-  assert.equal(shell.command, null);
+  render(root as unknown as HTMLElement, shell);
+  assert.equal(root.querySelector("#continue-last")?.textContent, "Resume · Celeste");
+
+  const stopped = reduceShell(shell, {
+    kind: "link",
+    link: step(shell.link, {
+      kind: "server",
+      message: message('{"version":2,"type":"host-session-status","state":"stopped"}'),
+    }, context).state,
+  });
+  assert.equal(focusMap(stopped).some((item) => item.id === "continue-last"), false);
+  render(root as unknown as HTMLElement, stopped);
+  assert.equal(root.querySelector("#continue-last"), null);
 });
 
 test("quit on disconnect sends stop-host-session and a fault does not", () => {
@@ -424,6 +444,18 @@ test("sort by last played orders the library", () => {
   shell = reduceShell(shell, { kind: "open-library" });
   assert.deepEqual(libraryLists(shell).favourites.map((app) => app.id), ["celeste"]);
   assert.equal(libraryLists(shell).games.some((app) => app.id === "celeste"), false);
+});
+
+test("open last game does not replace a different game the host is running", () => {
+  let shell = withApps([
+    app("celeste", "Celeste", true),
+    app("hades", "Hades", false),
+  ], "celeste");
+  shell = reduceShell(shell, { kind: "remember-last", appId: "hades" });
+  shell = { ...shell, launch: "last-game", launchSpent: false };
+  shell = reduceShell(shell, { kind: "arm-countdown" });
+  assert.equal(shell.countdown, null);
+  assert.equal(shell.launchSpent, true);
 });
 
 test("the countdown can be cancelled and is skipped after a failure", () => {
