@@ -12,3 +12,8 @@ test("a package without tv.inputdevice is rejected", () => {
   const xml = `<tizen:privilege name="http://tizen.org/privilege/internet"/>`;
   assert.equal(missingPrivileges(xml).includes("http://tizen.org/privilege/tv.inputdevice"), true);
 });
+
+test("the package enables the pointing device Samsung leaves off on 2021 and later TVs", () => {
+  const xml = readFileSync(new URL("../tizen/config.xml", import.meta.url), "utf8");
+  assert.match(xml, /pointing-device-support="enable"/);
+});
