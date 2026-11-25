@@ -515,11 +515,16 @@ export function continueAppId(shell: Shell): string | null {
   if (running && apps.some((app) => app.id === running)) {
     return running;
   }
-  const last = lastAppId(shell);
-  if (last && apps.some((app) => app.id === last)) {
-    return last;
-  }
   return null;
+}
+
+export function libraryEntryFocus(shell: Shell): string {
+  if (continueAppId(shell)) {
+    return "continue-last";
+  }
+  const lists = libraryLists(shell);
+  const first = lists.favourites[0] ?? lists.games[0];
+  return first ? `game-${first.id}` : "library-sort";
 }
 
 function libraryKey(shell: Shell): string | null {
@@ -946,10 +951,10 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
   switch (action.kind) {
     case "back": {
       if (shell.countdown) {
-        return { ...shell, countdown: null, launchSpent: true, focusId: "continue-last" };
+        return { ...shell, countdown: null, launchSpent: true, focusId: libraryEntryFocus(shell) };
       }
       if (shell.startError) {
-        return { ...shell, startError: null, launchSpent: true, focusId: shell.screen === "game" ? "play-game" : "continue-last" };
+        return { ...shell, startError: null, launchSpent: true, focusId: shell.screen === "game" ? "play-game" : libraryEntryFocus(shell) };
       }
       if (shell.screen === "stream" && shell.menuOpen) {
         return { ...shell, menuOpen: false };
@@ -961,7 +966,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         return { ...shell, confirmAppId: null, command: null, focusId: "play-game" };
       }
       if (shell.screen === "game") {
-        return { ...shell, screen: "library", focusId: "continue-last", command: null };
+        return { ...shell, screen: "library", focusId: libraryEntryFocus(shell), command: null };
       }
       const association = shell.association;
       if (association.kind === "forget") {
@@ -1129,7 +1134,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.link.phase.kind !== "online" || shell.association.kind !== "pair" || shell.association.view.kind !== "paired") {
         return shell;
       }
-      return { ...shell, screen: "library", association: { kind: "browse" }, menuOpen: false, focusId: "continue-last", launchSpent: true };
+      return { ...shell, screen: "library", association: { kind: "browse" }, menuOpen: false, focusId: libraryEntryFocus(shell), launchSpent: true };
     case "open-settings":
       return { ...shell, screen: "settings", menuOpen: false, focusId: "setting-resolution", confirmAppId: null, launchSpent: true };
     case "open-hosts":
@@ -1138,7 +1143,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.link.phase.kind !== "online" && appsFor(shell).length === 0) {
         return shell;
       }
-      return { ...shell, screen: "library", menuOpen: false, confirmAppId: null, focusId: "continue-last", launchSpent: true };
+      return { ...shell, screen: "library", menuOpen: false, confirmAppId: null, focusId: libraryEntryFocus(shell), launchSpent: true };
     case "open-game": {
       const known = appsFor(shell).some((app) => app.id === action.appId);
       if (!known) {
@@ -1175,7 +1180,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         association: entry,
       };
       if (next.link.phase.kind !== "online" && appsFor(next).length > 0) {
-        return { ...next, screen: "library", focusId: "continue-last" };
+        return { ...next, screen: "library", focusId: libraryEntryFocus(next) };
       }
       return next;
     }
@@ -1199,10 +1204,11 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       const catalogs = action.link.phase.kind === "online" ? rememberCatalog(shell, action.link.phase.snapshot) : shell.catalogs;
       const enteredPair = screen === "pair" && (shell.screen !== "pair" || shell.association.kind !== "pair" || (association.kind === "pair" && shell.association.kind === "pair" && shell.association.view.kind !== association.view.kind));
       const sameFailure = shell.startError?.code === startError?.code && shell.startError?.appId === startError?.appId;
+      const enteredLibrary = screen === "library" && shell.screen !== "library";
       const focusId = startError && !sameFailure
         ? "start-retry"
-        : screen === "library" && shell.screen !== "library"
-          ? "continue-last"
+        : enteredLibrary
+          ? libraryEntryFocus({ ...shell, link: action.link, catalogs })
           : enteredPair && association.kind === "pair"
             ? pairFocus(association.view)
             : shell.focusId;
@@ -1317,7 +1323,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         focusId: "start-retry",
       };
     case "dismiss-start":
-      return { ...shell, startError: null, focusId: shell.screen === "game" ? "play-game" : "continue-last" };
+      return { ...shell, startError: null, focusId: shell.screen === "game" ? "play-game" : libraryEntryFocus(shell) };
     case "retry-start": {
       const failure = shell.startError;
       if (!failure) {
@@ -1335,8 +1341,9 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.screen !== "library") {
         return shell;
       }
-      const appId = continueAppId(shell);
-      if (!appId) {
+      const appId = lastAppId(shell);
+      const running = runningAppId(shell);
+      if (!appId || !appsFor(shell).some((app) => app.id === appId) || (running !== null && running !== appId)) {
         return { ...shell, launchSpent: true };
       }
       return { ...shell, launchSpent: true, countdown: { appId, seconds: 3 }, focusId: "countdown-cancel" };
@@ -1352,7 +1359,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       return { ...shell, countdown: { appId: shell.countdown.appId, seconds: shell.countdown.seconds - 1 } };
     }
     case "cancel-countdown":
-      return { ...shell, countdown: null, launchSpent: true, focusId: "continue-last" };
+      return { ...shell, countdown: null, launchSpent: true, focusId: libraryEntryFocus(shell) };
     default: {
       const exhaustive: never = action;
       return exhaustive;

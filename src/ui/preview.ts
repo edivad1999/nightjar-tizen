@@ -1,7 +1,7 @@
 import { STEREO_EXTENSIONS } from "../domain/settings.ts";
 import { initialLink, type HostSnapshot } from "../protocol/machine.ts";
 import type { AppEntry } from "../protocol/parse.ts";
-import { initialShell, reduceShell } from "./model.ts";
+import { initialShell, libraryEntryFocus, reduceShell } from "./model.ts";
 import { FRAME_INTERPOLATION, applyStreamView } from "./overlay.ts";
 import { shellForShot } from "./shots.ts";
 import { text } from "./strings.ts";
@@ -130,7 +130,7 @@ function place(): void {
     shell = reduceShell(shell, { kind: "toggle-more" });
     return;
   }
-  shell = reduceShell(shell, { kind: "focus", id: "continue-last" });
+  shell = reduceShell(shell, { kind: "focus", id: libraryEntryFocus(shell) });
 }
 
 function appsFrom(value: unknown): AppEntry[] {

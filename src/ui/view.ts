@@ -975,10 +975,9 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
     const continueId = continueAppId(shell);
     const continueApp = appById(shell, continueId);
     if (continueApp) {
-      const running = appRunning(shell, continueApp);
       const card = button(
         "continue-last",
-        `${running ? say(shell, "resume") : say(shell, "continue")} · ${continueApp.title}`,
+        `${say(shell, "resume")} · ${continueApp.title}`,
         "button primary continue-card",
       );
       page.append(card);

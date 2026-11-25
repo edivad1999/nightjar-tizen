@@ -259,6 +259,19 @@ function statusForCurrentStream(stream: StreamPhase, sessionId: number | null, s
   return current === null;
 }
 
+function acceptedRunning(snapshot: HostSnapshot): HostSnapshot {
+  if (snapshot.stream.kind === "none") {
+    return snapshot;
+  }
+  if (snapshot.stream.state !== "starting-webrtc" && snapshot.stream.state !== "streaming") {
+    return snapshot;
+  }
+  if (snapshot.stream.appId.length === 0) {
+    return snapshot;
+  }
+  return withRunning(snapshot, snapshot.stream.appId);
+}
+
 function applySession(snapshot: HostSnapshot, stateName: string, sessionId: number | null, message: string | null): HostSnapshot {
   if (stateName === "idle") {
     return { ...snapshot, sessionActive: false, stream: { kind: "none" }, banner: null };
@@ -477,7 +490,7 @@ function onServer(state: LinkState, message: ServerMessage, context: StepContext
       if (!snapshot || !statusForCurrentStream(snapshot.stream, message.sessionId, message.state)) {
         return same(state);
       }
-      const applied = applySession(snapshot, message.state, message.sessionId, message.message);
+      const applied = acceptedRunning(applySession(snapshot, message.state, message.sessionId, message.message));
       const negotiated = message.video || message.audio
         ? { video: message.video, audio: message.audio }
         : snapshot.negotiated;
