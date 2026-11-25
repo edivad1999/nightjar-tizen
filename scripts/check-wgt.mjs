@@ -91,8 +91,8 @@ function assertLauncherIcon(xml, entries) {
       `launcher icon must be a 512x512 8-bit RGBA PNG, got ${png.width}x${png.height} bit ${png.bitDepth} color ${png.colorType}`,
     );
   }
-  const night = countRgba(png, 20, 22, 31, 255);
-  const moon = countRgba(png, 242, 169, 59, 255);
+  const night = countRgba(png, 0x14, 0x16, 0x1f, 255);
+  const moon = countRgba(png, 0xf2, 0xa9, 0x3b, 255);
   if (night === 0 || moon === 0) {
     throw new Error("launcher icon is not the Nightjar mark");
   }

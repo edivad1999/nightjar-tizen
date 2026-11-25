@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { mkdir, readFile, writeFile, cp, rm } from "node:fs/promises";
-import { deflateRawSync, deflateSync } from "node:zlib";
+import { deflateRawSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -44,7 +44,7 @@ await cp(join(root, "tizen/wasm/nightjar-udp.js"), join(stage, "wasm/nightjar-ud
 for (const name of ["wake-on-lan.js", "wake-on-lan.wasm", "wake-on-lan.worker.js", "wake-on-lan.js.mem"]) {
   await cp(join(wolOut, name), join(stage, "wasm", name));
 }
-await writeFile(join(stage, "icon.png"), png(117, 117, 16, 20, 28));
+await cp(join(root, "tizen/icon.png"), join(stage, "icon.png"));
 
 const files = [
   "config.xml",
@@ -71,36 +71,6 @@ if (packed.subarray(0, 2).toString() !== "PK") {
   throw new Error("wgt is not a zip");
 }
 console.log(`built ${output} (${packed.length} bytes)`);
-
-function png(width, height, r, g, b) {
-  const row = Buffer.alloc(1 + width * 3);
-  for (let x = 0; x < width; x += 1) {
-    row[1 + x * 3] = r;
-    row[2 + x * 3] = g;
-    row[3 + x * 3] = b;
-  }
-  const raw = Buffer.concat(Array.from({ length: height }, () => row));
-  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  return Buffer.concat([
-    signature,
-    chunk("IHDR", Buffer.from([
-      width >> 24, width >> 16, width >> 8, width,
-      height >> 24, height >> 16, height >> 8, height,
-      8, 2, 0, 0, 0,
-    ])),
-    chunk("IDAT", deflateSync(raw)),
-    chunk("IEND", Buffer.alloc(0)),
-  ]);
-}
-
-function chunk(type, data) {
-  const body = Buffer.concat([Buffer.from(type), data]);
-  const length = Buffer.alloc(4);
-  length.writeUInt32BE(data.length);
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(body));
-  return Buffer.concat([length, body, crc]);
-}
 
 function crc32(buffer) {
   let crc = 0xffffffff;
