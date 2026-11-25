@@ -562,7 +562,7 @@ const SAME_IN_BOTH = new Set<StringKey>([
   "italian",
 ]);
 
-test("the stream page hides the pointer", () => {
+test("the playing stream hides the pointer and the menu shows it", () => {
   let shell = withApps([app("celeste", "Celeste", true)], "celeste");
   const phase = shell.link.phase;
   if (phase.kind !== "online") {
@@ -590,7 +590,7 @@ test("the stream page hides the pointer", () => {
   shell = reduceShell(shell, { kind: "back" });
   render(root as unknown as HTMLElement, shell);
   const menu = root.querySelector("main");
-  assert.match(menu?.className ?? "", /hide-pointer/);
+  assert.equal((menu?.className ?? "").includes("hide-pointer"), false);
   assert.equal((menu?.className ?? "").includes("stream-clear"), false);
 });
 

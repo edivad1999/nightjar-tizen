@@ -33,7 +33,7 @@ function playing(now: number, controls: ControlPrefs = DEFAULT_CONTROLS, buffere
   return {
     now,
     streaming: true,
-    onStream: true,
+    focus: "stream",
     tabs: false,
     bufferedAmount,
     controlOpen: true,
@@ -43,20 +43,11 @@ function playing(now: number, controls: ControlPrefs = DEFAULT_CONTROLS, buffere
 }
 
 function menu(now: number): PadEnv {
-  return {
-    now,
-    streaming: true,
-    onStream: true,
-    tabs: false,
-    bufferedAmount: 0,
-    controlOpen: true,
-    gamepadOpen: true,
-    controls: DEFAULT_CONTROLS,
-  };
+  return { ...playing(now), focus: "app" };
 }
 
 function browsing(now: number): PadEnv {
-  return { ...menu(now), streaming: false, onStream: false, tabs: true, gamepadOpen: false, controlOpen: false };
+  return { ...menu(now), streaming: false, focus: "app", tabs: true, gamepadOpen: false, controlOpen: false };
 }
 
 function messages(effects: { kind: string; text?: string }[], kind: "gamepad" | "control"): Record<string, unknown>[] {
@@ -105,11 +96,14 @@ test("holding Back during a stream stays a game button", () => {
   assert.equal(held.gamepad.at(-1)?.buttons, Button.BACK);
 });
 
-test("an open stream menu does not take the gamepad", () => {
-  const { effects, gamepad } = run(createPads(), [pad({ pressed: [0, 1, 9], axes: [0, -1, 0, 0] })], menu(0));
-  const ui = effects.filter((effect) => effect.kind !== "control" && effect.kind !== "gamepad");
-  assert.deepEqual(ui, []);
-  assert.equal(gamepad[0]?.buttons, Button.A | Button.B | Button.START);
+test("an open stream menu takes the gamepad and sends no buttons to the host", () => {
+  const state = createPads();
+  const live = run(state, [pad({ pressed: [0] })], playing(0));
+  assert.equal(live.gamepad[0]?.buttons, Button.A);
+  const { effects, gamepad } = run(state, [pad({ pressed: [1, 12] })], menu(20));
+  assert.equal(effects.some((effect) => effect.kind === "back"), true);
+  assert.equal(effects.some((effect) => effect.kind === "move"), true);
+  assert.equal(gamepad.every((message) => message.buttons === 0), true);
 });
 
 test("B goes back in a menu and stays a game button while the stream is live", () => {

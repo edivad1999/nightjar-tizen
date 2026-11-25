@@ -37,17 +37,18 @@ import {
   type PadEffect,
   type PadSnapshot,
 } from "../input/pads.ts";
-import { acceptPointerSource, armKeyboard, keyboardIsActive, localPointer, mouseMode, mouseStatusLine, pointerEdge, routeStreamKey, type KeyboardLatch, type MouseMode, type Point } from "../input/local-input.ts";
+import { captureLocalInput, pointerLockStep } from "../input/focus.ts";
+import { acceptPointerSource, localPointer, mouseMode, mouseStatusLine, pointerEdge, routeStreamKey, type MouseMode, type Point } from "../input/local-input.ts";
 import { InputSession, Wheel, keyMessage, nextButtonMask, textMessages } from "../protocol/input.ts";
 import { DISCOVER_DATAGRAM, DISCOVERY_PORT, clientLogMessage, keyframeMessage } from "../protocol/parse.ts";
 import { magicPacket, stepWakePlay, type WakePlay } from "../protocol/wol.ts";
 import { openArtworkCache, type CachedApp } from "../storage/artwork-cache.ts";
 import { credentialsForDiscovery, bindStorage, loadPersisted, migrateLibraryKeys, readStored, serializePersisted, shouldWriteHosts, updateHost, upsertHosts, wakesAutomatically, writeHostCredentials, writeStored, type SavedHost } from "../storage/persist.ts";
 import { moveFocus, type FocusItem } from "./focus.ts";
-import { applyStreamKey, keyAction, leavesForTv, type KeySample } from "./keys.ts";
+import { isStreamMenuBack, keyAction, leavesForTv, type KeySample } from "./keys.ts";
 import { createLaunchTrace, type LaunchSignal } from "./launch-debug.ts";
 import { streamHintDeadline, streamHintPhase, type StreamHintInput } from "./stream-chrome.ts";
-import { activateFocused, addressDraft, cacheIds, disconnectCommand, initialShell, isLibraryControl, lastAppForHost, preferredCacheId, reduceShell, type LaunchChoice, type LibrarySort, type PairNotice, type SessionCommand, type Shell, type StartFailure, type TextSize } from "./model.ts";
+import { activateFocused, addressDraft, cacheIds, disconnectCommand, initialShell, isLibraryControl, lastAppForHost, preferredCacheId, reduceShell, shellInputFocus, type LaunchChoice, type LibrarySort, type PairNotice, type SessionCommand, type Shell, type StartFailure, type TextSize } from "./model.ts";
 import { healthOverlayVisible } from "./overlay.ts";
 import { createStreamHealth, type StreamContext } from "./stream-health.ts";
 import { text } from "./strings.ts";
@@ -292,7 +293,7 @@ let pointerThisTurn = false;
 let mouseSeen = 0;
 let mouseSent = 0;
 let reportedMouse: MouseMode | null = null;
-let keyboardLatch: KeyboardLatch | null = null;
+let lockPending = false;
 let capturingInput = false;
 const pads = createPads();
 let padToken = "";
@@ -442,11 +443,7 @@ function persist(): void {
 }
 
 function streamCapturing(): boolean {
-  const phase = shell.link.phase;
-  return shell.screen === "stream"
-    && !shell.menuOpen
-    && phase.kind === "online"
-    && phase.snapshot.stream.kind !== "none";
+  return captureLocalInput(shellInputFocus(shell), controlPrefs().localInput);
 }
 
 function releaseStreamInput(): void {
@@ -456,10 +453,36 @@ function releaseStreamInput(): void {
   buttonLive = false;
   mouseSeen = 0;
   mouseSent = 0;
-  keyboardLatch = null;
+  lockPending = false;
   wheel.reset();
   if (document.pointerLockElement) {
     document.exitPointerLock();
+  }
+}
+
+function requestStreamPointerLock(): void {
+  try {
+    void Promise.resolve(streamVideo.requestPointerLock()).catch(() => undefined);
+  } catch {
+    /* The runtime threw instead of returning a refused promise. */
+  }
+}
+
+function syncPointerLock(): void {
+  const decision = pointerLockStep({
+    capture: streamCapturing(),
+    locked: document.pointerLockElement === streamVideo,
+    pending: lockPending,
+  });
+  lockPending = decision.pending;
+  if (decision.action === "release") {
+    if (document.pointerLockElement) {
+      document.exitPointerLock();
+    }
+    return;
+  }
+  if (decision.action === "acquire") {
+    requestStreamPointerLock();
   }
 }
 
@@ -489,6 +512,7 @@ function paint(): void {
     releaseStreamInput();
   }
   capturingInput = capture;
+  syncPointerLock();
   setStreamMenuHealth(health.performanceShown(), health.logsEnabled());
   focusItems = render(appRoot, shell);
   syncChrome();
@@ -1256,69 +1280,36 @@ function keySample(event: KeyboardEvent, type: "keydown" | "keyup"): KeySample {
   return { type, code: event.code, key: event.key, keyCode: event.keyCode };
 }
 
-function streamUiOpen(): boolean {
-  if (shell.screen !== "stream") {
-    return true;
+function sendHostKey(route: { code: string; down: boolean }): void {
+  const message = keyMessage(route.code, route.down);
+  if (message) {
+    streamInput.send(message);
   }
-  return shell.menuOpen || shell.playbackBlocked || shell.startError !== null;
-}
-
-function takeStreamKey(event: KeyboardEvent, type: "keydown" | "keyup"): "ui" | "done" {
-  const sample = keySample(event, type);
-  if (leavesForTv(sample, event.repeat)) {
-    return "ui";
-  }
-  const now = Date.now();
-  const route = routeStreamKey({
-    uiOpen: streamUiOpen(),
-    enabled: controlPrefs().localInput,
-    keyboardActive: keyboardIsActive(keyboardLatch, now),
-    event: sample,
-  });
-  if (route.arm) {
-    keyboardLatch = armKeyboard(now);
-  }
-  if (route.kind === "ui") {
-    return "ui";
-  }
-  event.preventDefault();
-  if (route.kind === "host") {
-    const message = keyMessage(route.code, route.down);
-    if (message) {
-      streamInput.send(message);
-    }
-  }
-  return "done";
 }
 
 document.addEventListener("keydown", (event) => {
   const sample = keySample(event, "keydown");
-  if (leavesForTv(sample, event.repeat)) {
+  const route = routeStreamKey({
+    focus: shellInputFocus(shell),
+    enabled: controlPrefs().localInput,
+    event: sample,
+    repeat: event.repeat,
+  });
+  if (route.to === "tv") {
+    return;
+  }
+  if (route.to === "host") {
+    event.preventDefault();
+    sendHostKey(route);
+    return;
+  }
+  if (route.to === "drop") {
+    event.preventDefault();
     return;
   }
   if (shell.playbackBlocked && shell.screen === "stream" && keyAction(event.code, event.keyCode) === "activate") {
     event.preventDefault();
     peer.primePlayback();
-    return;
-  }
-  if (takeStreamKey(event, "keydown") === "done") {
-    return;
-  }
-  const outcome = applyStreamKey({
-    capturing: streamCapturing(),
-    event: sample,
-    repeat: event.repeat,
-    send: (message) => {
-      streamInput.send(message);
-    },
-  });
-  if (outcome === "menu") {
-    event.preventDefault();
-    apply({ kind: "back" });
-    return;
-  }
-  if (outcome === "sent") {
-    event.preventDefault();
     return;
   }
   if (shell.screen === "add") {
@@ -1329,7 +1320,7 @@ document.addEventListener("keydown", (event) => {
       return;
     }
   }
-  const action = keyAction(event.code, event.keyCode);
+  const action = keyAction(event.code, event.keyCode) ?? (isStreamMenuBack(sample) ? "back" : null);
   if (!action) {
     return;
   }
@@ -1353,21 +1344,18 @@ document.addEventListener("keydown", (event) => {
 
 document.addEventListener("keyup", (event) => {
   const sample = keySample(event, "keyup");
-  if (leavesForTv(sample, event.repeat)) {
-    return;
-  }
-  if (takeStreamKey(event, "keyup") === "done") {
-    return;
-  }
-  const outcome = applyStreamKey({
-    capturing: streamCapturing(),
+  const route = routeStreamKey({
+    focus: shellInputFocus(shell),
+    enabled: controlPrefs().localInput,
     event: sample,
     repeat: event.repeat,
-    send: (message) => {
-      streamInput.send(message);
-    },
   });
-  if (outcome === "sent") {
+  if (route.to === "host") {
+    event.preventDefault();
+    sendHostKey(route);
+    return;
+  }
+  if (route.to === "drop") {
     event.preventDefault();
   }
 });
@@ -1400,11 +1388,8 @@ function takePointer(event: MouseEvent, source: "pointer" | "mouse"): void {
     locked: document.pointerLockElement === streamVideo,
   });
   if (edge === "down" && mode !== "none" && document.pointerLockElement !== streamVideo) {
-    try {
-      void Promise.resolve(streamVideo.requestPointerLock()).catch(() => undefined);
-    } catch {
-      /* The runtime threw instead of returning a refused promise. */
-    }
+    lockPending = true;
+    requestStreamPointerLock();
   }
   if (mode !== "none") {
     const result = localPointer({
@@ -1666,7 +1651,7 @@ window.setInterval(() => {
   const effects = stepPads(pads, readGamepads(), {
     now: performance.now(),
     streaming,
-    onStream: shell.screen === "stream",
+    focus: shellInputFocus(shell),
     tabs: shell.screen === "library" || shell.screen === "game" || shell.screen === "settings",
     bufferedAmount: peer.gamepadBufferedAmount(),
     controlOpen: peer.controlOpen(),

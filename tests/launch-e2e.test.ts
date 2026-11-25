@@ -131,7 +131,7 @@ test("library play reaches a playing video and a stereo answer", { timeout: 60_0
     (window as unknown as { inputFrames: string[] }).inputFrames = frames;
     const send = RTCDataChannel.prototype.send;
     RTCDataChannel.prototype.send = function (data) {
-      if (this.label === "input") frames.push(String(data));
+      if (this.label === "input" || this.label === "gamepad") frames.push(String(data));
       Reflect.apply(send, this, [data]);
     };
   }, mock.port);
@@ -170,12 +170,16 @@ test("library play reaches a playing video and a stereo answer", { timeout: 60_0
         buttons: 0,
         clientX: 10,
         clientY: 10,
+        movementX: -3,
+        movementY: 5,
       }));
       document.dispatchEvent(new MouseEvent("mousemove", {
         bubbles: true,
         buttons: 0,
         clientX: 25,
         clientY: 18,
+        movementX: 8,
+        movementY: 2,
       }));
       document.dispatchEvent(new PointerEvent("pointerdown", {
         bubbles: true,
@@ -204,7 +208,100 @@ test("library play reaches a playing video and a stereo answer", { timeout: 60_0
       delivered.frames.some((line) => line.includes('"type":"mouse-button"') && line.includes('"button":0')),
       true,
     );
-    assert.match(delivered.line, /mouse fallback in \d+ sent [1-9]/);
+    assert.match(delivered.line, /mouse (fallback|locked) in \d+ sent [1-9]/);
+
+    const hostKeys = await page.evaluate(() => {
+      const frames = (window as unknown as { inputFrames: string[] }).inputFrames;
+      const start = frames.length;
+      document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape", code: "Escape" }));
+      document.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Escape", code: "Escape" }));
+      document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "ArrowLeft", code: "ArrowLeft" }));
+      document.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "ArrowLeft", code: "ArrowLeft" }));
+      document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+      document.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+      return {
+        sent: frames.slice(start),
+        menu: document.querySelector("#menu-resume") !== null,
+      };
+    });
+    assert.equal(hostKeys.menu, false);
+    assert.equal(hostKeys.sent.some((line) => line.includes('"code":"Escape"')), true);
+    assert.equal(hostKeys.sent.some((line) => line.includes('"code":"ArrowLeft"')), true);
+    assert.equal(hostKeys.sent.some((line) => line.includes('"code":"Enter"')), true);
+
+    await page.evaluate(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "XF86Back",
+        code: "GoBack",
+      }));
+    });
+    await page.waitForSelector("#menu-resume");
+    const menuLine = await page.$eval("#mouse-debug", (node) => node.textContent ?? "");
+    assert.match(menuLine, /mouse none /);
+    const duringMenu = await page.evaluate(() => {
+      const frames = (window as unknown as { inputFrames: string[] }).inputFrames;
+      const start = frames.length;
+      const press = (key: string) => {
+        document.dispatchEvent(new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key,
+          code: key,
+        }));
+      };
+      const active = () => document.activeElement instanceof HTMLElement ? document.activeElement.id : "";
+      press("ArrowDown");
+      const afterArrow = { focused: active(), menu: document.querySelector("#menu-resume") !== null };
+      press("Enter");
+      const afterEnter = { focused: active(), menu: document.querySelector("#menu-resume") !== null };
+      press("Escape");
+      return {
+        sent: frames.slice(start).filter((line) => line.includes('"type":"key"')),
+        afterArrow,
+        afterEnter,
+        menuAfterEscape: document.querySelector("#menu-resume") !== null,
+      };
+    });
+    assert.equal(duringMenu.afterArrow.focused, "menu-stats");
+    assert.equal(duringMenu.afterArrow.menu, true);
+    assert.equal(duringMenu.afterEnter.focused, "menu-stats");
+    assert.equal(duringMenu.afterEnter.menu, true);
+    assert.equal(duringMenu.menuAfterEscape, false);
+    assert.deepEqual(duringMenu.sent, []);
+    await page.evaluate(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "XF86Back",
+        code: "GoBack",
+      }));
+    });
+    await page.waitForSelector("#menu-resume");
+    const beforeClick = await page.evaluate(() => (window as unknown as { inputFrames: string[] }).inputFrames.length);
+    await page.click("#menu-resume");
+    await page.waitForFunction(() => document.querySelector("#menu-resume") === null);
+    const clickSent = await page.evaluate((start) => {
+      return (window as unknown as { inputFrames: string[] }).inputFrames.slice(start);
+    }, beforeClick);
+    assert.equal(clickSent.some((line) => line.includes('"type":"mouse-button"')), false);
+    const returned = await page.evaluate(() => {
+      const frames = (window as unknown as { inputFrames: string[] }).inputFrames;
+      const start = frames.length;
+      document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 30, clientY: 30, movementX: 4, movementY: 2 }));
+      document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 48, clientY: 40, movementX: 6, movementY: -3 }));
+      document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "ArrowRight", code: "ArrowRight" }));
+      return {
+        sent: frames.slice(start),
+        line: document.querySelector("#mouse-debug")?.textContent ?? "",
+        menu: document.querySelector("#menu-resume") !== null,
+      };
+    });
+    assert.equal(returned.menu, false);
+    assert.equal(returned.sent.some((line) => line.includes('"code":"ArrowRight"')), true);
+    assert.equal(returned.sent.some((line) => line.includes('"type":"mouse-move"')), true);
+    assert.match(returned.line, /mouse (fallback|locked) in \d+ sent [1-9]/);
   } finally {
     await browser.close();
     await mock.close();

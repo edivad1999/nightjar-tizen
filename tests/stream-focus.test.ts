@@ -28,7 +28,7 @@ function streamingShell(): Shell {
           sessionActive: true,
           runningAppId: "7",
           modes: [],
-          extensions: null,
+          extensions: { audioChannels: [2], input: null, codecFrameRates: [] },
           audioChannels: 2,
           apps: [],
           artwork: {},
@@ -213,7 +213,7 @@ test("a sound prompt, a start failure, and a dead session keep focus on the app"
     enabled: false,
     event: key("Escape", "Escape", 27),
   }).to, "drop");
-  assert.equal(routeStreamKey({
+  assert.deepEqual(routeStreamKey({
     focus: "stream",
     enabled: true,
     event: key("ColorF0Red", "ColorF0Red", 403),

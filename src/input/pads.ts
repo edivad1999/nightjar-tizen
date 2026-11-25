@@ -1,4 +1,5 @@
 import { flipFaceButtons, type ControlPrefs } from "../domain/controls.ts";
+import type { InputFocus } from "./focus.ts";
 import {
   Button,
   connectedMessage,
@@ -48,7 +49,7 @@ export type PadEnv = {
   now: number;
   /** A stream exists, so the pad should be announced on the control channel. */
   streaming: boolean;
-  onStream: boolean;
+  focus: InputFocus;
   tabs: boolean;
   bufferedAmount: number;
   controlOpen: boolean;
@@ -249,7 +250,7 @@ function createSlot(controllerId: number, identity: string, index: number): Slot
 }
 
 function padToGame(env: PadEnv): boolean {
-  return env.streaming || env.onStream;
+  return env.focus === "stream";
 }
 
 function releaseHeld(slot: Slot, env: PadEnv, effects: PadEffect[]): void {
