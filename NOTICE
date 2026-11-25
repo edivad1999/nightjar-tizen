@@ -18,3 +18,7 @@ independent implementation of FIPS 180-4 and RFC 2104. A Tizen web app is not
 a secure context, so crypto.subtle is not used.
 
 The retired Windows gateway in tsoas/moonlight-webrtc-tizen is not included.
+
+tizen/icon.png is a 512x512 raster of the Nightjar launcher mark in
+RamazanKara/nightjar, file app/src/main/res/drawable/ic_nightjar_foreground.xml,
+drawn on #14161F. That project is GPL-3.0.
