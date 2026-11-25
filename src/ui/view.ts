@@ -59,6 +59,19 @@ export function applyLaunchPanel(node: HTMLElement, text: string, shown: boolean
   node.scrollTop = node.scrollHeight;
 }
 
+export function mountMouseDebug(parent: ParentNode): HTMLElement {
+  const node = el("p", "mouse-debug");
+  node.id = "mouse-debug";
+  node.hidden = true;
+  parent.append(node);
+  return node;
+}
+
+export function applyMouseDebug(node: HTMLElement, line: string, shown: boolean): void {
+  node.hidden = !shown;
+  node.textContent = line;
+}
+
 export function mountStreamHint(parent: ParentNode): HTMLElement {
   const node = el("p", "stream-hint");
   node.id = "stream-hint";
