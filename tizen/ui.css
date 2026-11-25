@@ -262,6 +262,7 @@ button, input { font-family: inherit; }
   margin: 0;
 }
 
+.button.danger { color: var(--danger); }
 .button.primary, .key.primary {
   background: var(--accent);
   color: var(--accent-ink);

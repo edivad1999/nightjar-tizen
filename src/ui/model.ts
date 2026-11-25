@@ -83,7 +83,8 @@ export type SessionCommand =
   | { kind: "start-session"; appId: string }
   | { kind: "switch-session"; appId: string }
   | { kind: "stop-session" }
-  | { kind: "stop-host-session" };
+  | { kind: "stop-host-session" }
+  | { kind: "dismiss-quit" };
 
 export type Shell = {
   screen: AppScreen;
@@ -92,6 +93,7 @@ export type Shell = {
   hosts: SavedHost[];
   activeAddress: string | null;
   confirmAppId: string | null;
+  quitAsk: string | null;
   toast: Toast;
   association: Association;
   focusId: string | null;
@@ -154,6 +156,9 @@ export type ShellAction =
   | { kind: "finish-pair" }
   | { kind: "confirm-play"; appId: string }
   | { kind: "cancel-confirm" }
+  | { kind: "ask-quit" }
+  | { kind: "confirm-quit" }
+  | { kind: "cancel-quit" }
   | { kind: "toggle-menu" }
   | { kind: "request-play" }
   | { kind: "toggle-more" }
@@ -162,7 +167,6 @@ export type ShellAction =
   | { kind: "toggle-launch-debug" }
   | { kind: "remember-last"; appId: string }
   | { kind: "disconnect" }
-  | { kind: "quit-host" }
   | { kind: "consume-command" }
   | { kind: "cycle-setting"; setting: "resolution" | "bitrate" }
   | { kind: "toggle-sort" }
@@ -192,6 +196,7 @@ export function initialShell(): Shell {
     hosts: [],
     activeAddress: null,
     confirmAppId: null,
+    quitAsk: null,
     toast: { kind: "hidden" },
     association: { kind: "browse" },
     focusId: "add-host",
@@ -750,7 +755,21 @@ function addressKey(entry: Extract<Association, { kind: "address" }>, key: strin
   return { ...entry, draft: entry.draft + key, problem: "none" };
 }
 
+function askQuit(shell: Shell): Shell {
+  if (shell.link.quit?.phase === "waiting") {
+    return shell;
+  }
+  const appId = runningAppId(shell);
+  if (!appId) {
+    return shell;
+  }
+  return { ...shell, quitAsk: appId, command: null, focusId: "cancel-quit" };
+}
+
 function requestPlay(shell: Shell): Shell {
+  if (shell.quitAsk || shell.link.quit?.phase === "waiting") {
+    return shell;
+  }
   const appId = shell.selectedAppId;
   const snapshot = snapshotOf(shell);
   if (!appId || !snapshot) {
@@ -950,6 +969,12 @@ function cycleResolution(shell: Shell): Shell {
 export function reduceShell(shell: Shell, action: ShellAction): Shell {
   switch (action.kind) {
     case "back": {
+      if (shell.link.quit?.phase === "waiting") {
+        return shell;
+      }
+      if (shell.quitAsk || shell.link.quit?.phase === "failed") {
+        return reduceShell(shell, { kind: "cancel-quit" });
+      }
       if (shell.countdown) {
         return { ...shell, countdown: null, launchSpent: true, focusId: libraryEntryFocus(shell) };
       }
@@ -1205,6 +1230,8 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       const enteredPair = screen === "pair" && (shell.screen !== "pair" || shell.association.kind !== "pair" || (association.kind === "pair" && shell.association.kind === "pair" && shell.association.view.kind !== association.view.kind));
       const sameFailure = shell.startError?.code === startError?.code && shell.startError?.appId === startError?.appId;
       const enteredLibrary = screen === "library" && shell.screen !== "library";
+      const linked = { ...shell, link: action.link, catalogs };
+      const quitAsk = shell.quitAsk && runningAppId(linked) === shell.quitAsk ? shell.quitAsk : null;
       const focusId = startError && !sameFailure
         ? "start-retry"
         : enteredLibrary
@@ -1224,6 +1251,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
         catalogs,
         startError,
         countdown: startError ? null : shell.countdown,
+        quitAsk,
       };
     }
     case "toast":
@@ -1257,8 +1285,25 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       return { ...shell, lastAppByAddress: remember(shell, action.appId), selectedAppId: shell.selectedAppId ?? action.appId };
     case "disconnect":
       return { ...shell, command: { kind: disconnectCommand(shell) } };
-    case "quit-host":
-      return { ...shell, command: { kind: "stop-host-session" } };
+    case "ask-quit":
+      return askQuit(shell);
+    case "confirm-quit": {
+      if (!shell.quitAsk || shell.link.quit?.phase === "waiting") {
+        return shell;
+      }
+      return { ...shell, quitAsk: null, command: { kind: "stop-host-session" }, focusId: null };
+    }
+    case "cancel-quit": {
+      const focusId = shell.screen === "game"
+        ? "play-game"
+        : shell.screen === "stream"
+          ? "menu-resume"
+          : libraryEntryFocus(shell);
+      if (shell.link.quit?.phase === "failed") {
+        return { ...shell, quitAsk: null, command: { kind: "dismiss-quit" }, focusId };
+      }
+      return { ...shell, quitAsk: null, command: null, focusId };
+    }
     case "consume-command":
       return { ...shell, command: null };
     case "cycle-setting": {
@@ -1335,7 +1380,7 @@ export function reduceShell(shell: Shell, action: ShellAction): Shell {
       if (shell.launchSpent || shell.countdown) {
         return shell;
       }
-      if (shell.launch !== "last-game" || shell.startError) {
+      if (shell.launch !== "last-game" || shell.startError || shell.quitAsk || shell.link.quit) {
         return { ...shell, launchSpent: true };
       }
       if (shell.screen !== "library") {
@@ -1375,6 +1420,10 @@ const libraryControls = new Set([
   "confirm-play",
   "cancel-play",
   "quit-game",
+  "quit-running",
+  "confirm-quit",
+  "cancel-quit",
+  "dismiss-quit",
   "leave-game",
   "menu-resume",
   "menu-disconnect",
@@ -1422,8 +1471,14 @@ export function activateFocused(shell: Shell, id: string): Shell {
   if (id === "cancel-play") {
     return reduceShell(shell, { kind: "cancel-confirm" });
   }
-  if (id === "quit-game" || id === "menu-quit") {
-    return reduceShell(shell, { kind: "quit-host" });
+  if (id === "quit-game" || id === "menu-quit" || id === "quit-running") {
+    return reduceShell(shell, { kind: "ask-quit" });
+  }
+  if (id === "confirm-quit") {
+    return reduceShell(shell, { kind: "confirm-quit" });
+  }
+  if (id === "cancel-quit" || id === "dismiss-quit") {
+    return reduceShell(shell, { kind: "cancel-quit" });
   }
   if (id === "menu-resume") {
     return reduceShell(shell, { kind: "toggle-menu" });

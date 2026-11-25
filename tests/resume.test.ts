@@ -255,6 +255,10 @@ test("quit keeps the running app until the host says it stopped", () => {
   assert.equal(asked.effects.some((effect) => effect.kind === "close-media"), false);
   assert.equal(streamOf(asked.state)?.kind, "live");
   assert.equal(runningOf(asked.state), "desktop");
+  assert.equal(asked.state.quit?.phase, "waiting");
+  const again = sent(asked.state, "quit-game");
+  assert.equal(again.effects.length, 0);
+  assert.equal(again.state.quit?.phase, "waiting");
   const stopping = step(asked.state, {
     kind: "server",
     message: server('{"version":2,"type":"host-session-status","state":"stopping","runningAppId":"desktop"}'),
@@ -271,6 +275,16 @@ test("quit keeps the running app until the host says it stopped", () => {
   }, context).state;
   assert.equal(runningOf(stopped), null);
   assert.equal(streamOf(stopped)?.kind, "none");
+});
+
+test("an unanswered quit reports failure and keeps the running app", () => {
+  const asked = sent(live("desktop"), "quit-game").state;
+  const timed = step(asked, { kind: "quit-timeout" }, context).state;
+  assert.equal(timed.quit?.phase, "failed");
+  assert.equal(runningOf(timed), "desktop");
+  const repeated = step(timed, { kind: "quit-timeout" }, context).state;
+  assert.equal(repeated.quit, timed.quit);
+  assert.equal(runningOf(repeated), "desktop");
 });
 
 test("a failed or unanswered quit leaves the app running", () => {
@@ -298,9 +312,10 @@ test("quit then launch another game starts it once the host reports nothing runn
   link = step(link, { kind: "quit-game" }, context).state;
   shell = reduceShell(shell, { kind: "link", link });
   assert.equal(runningAppId(shell), "desktop");
+  assert.equal(shell.link.quit?.phase, "waiting");
   const early = reduceShell(reduceShell(shell, { kind: "open-game", appId: "hades" }), { kind: "request-play" });
   assert.equal(early.command, null);
-  assert.equal(early.confirmAppId, "hades");
+  assert.equal(early.confirmAppId, null);
   link = step(link, {
     kind: "server",
     message: server('{"version":2,"type":"host-session-status","state":"stopped","runningAppId":"desktop"}'),
