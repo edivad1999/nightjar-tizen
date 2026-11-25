@@ -1137,7 +1137,12 @@ export function render(root: HTMLElement, shell: Shell): FocusItem[] {
   }
 
   if (shell.screen === "stream") {
-    page.className = shell.menuOpen ? "page hide-pointer" : "page stream-clear hide-pointer";
+    const bare = !shell.menuOpen
+      && !shell.playbackBlocked
+      && shell.startError === null
+      && shell.quitAsk === null
+      && shell.link.quit === null;
+    page.className = shell.menuOpen ? "page" : bare ? "page stream-clear hide-pointer" : "page stream-clear";
     if (!shell.menuOpen) {
       if (shell.playbackBlocked) {
         page.append(button("play-audio", say(shell, "pressOkForSound"), "button primary playback-prompt"));

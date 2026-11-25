@@ -15,6 +15,7 @@ import { initialLink, type HostSnapshot, type LinkState } from "../protocol/mach
 import type { AppEntry } from "../protocol/parse.ts";
 import type { CachedApp } from "../storage/artwork-cache.ts";
 import { updateHost, upsertHosts, wakesAutomatically, type SavedHost } from "../storage/persist.ts";
+import { inputFocus, type InputFocus } from "../input/focus.ts";
 import type { Locale, StringKey } from "./strings.ts";
 
 export type AppScreen = "hosts" | "add" | "discover" | "pair" | "help" | "library" | "game" | "settings" | "stream";
@@ -122,6 +123,21 @@ export type Shell = {
   countdown: Countdown | null;
   startError: StartFailure | null;
 };
+
+export function shellInputFocus(shell: Shell): InputFocus {
+  const phase = shell.link.phase;
+  return inputFocus({
+    screen: shell.screen,
+    sessionOpen: phase.kind === "online" && phase.snapshot.stream.kind !== "none",
+    menuOpen: shell.menuOpen,
+    playbackBlocked: shell.playbackBlocked,
+    dialogOpen: shell.startError !== null
+      || shell.confirmAppId !== null
+      || shell.countdown !== null
+      || shell.quitAsk !== null
+      || shell.link.quit !== null,
+  });
+}
 
 export type ShellAction =
   | { kind: "back" }

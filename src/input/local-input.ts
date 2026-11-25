@@ -1,5 +1,6 @@
 import { buttonChanges, mouseMoveMessage, type InputMessage, type PointerEdge } from "../protocol/input.ts";
-import { isStreamMenuBack, streamKeyDecision, type KeySample } from "../ui/keys.ts";
+import { isStreamMenuBack, leavesForTv, streamKeyDecision, type KeySample } from "../ui/keys.ts";
+import type { InputFocus } from "./focus.ts";
 
 export type Point = { x: number; y: number };
 
@@ -98,41 +99,8 @@ const REMOTE_NAMES = new Set([
 
 const REMOTE_KEY_CODES = new Set([10182, 403, 404, 405, 406]);
 
-// Arrow, Enter, and media keys are shared with the Samsung remote, which reports the same DOM codes.
-const SHARED_WITH_REMOTE = new Set([
-  "ArrowUp",
-  "ArrowDown",
-  "ArrowLeft",
-  "ArrowRight",
-  "Enter",
-  "NumpadEnter",
-  "MediaPlayPause",
-  "MediaStop",
-  "MediaTrackNext",
-  "MediaTrackPrevious",
-  "AudioVolumeMute",
-  "AudioVolumeDown",
-  "AudioVolumeUp",
-]);
-
-/**
- * Tizen gives the remote and a USB keyboard the same `code` for Arrow and Enter, so one event
- * cannot tell them apart. A letter, digit, or other code the remote never sends arms this latch.
- * Shared keys stay on the remote path until the latch is active, and the latch ends after this
- * much time with no further keyboard-only key. `location` does not help: both devices use 0.
- */
-export const KEYBOARD_LATCH_MS = 2000;
-
-export type KeyboardLatch = { until: number };
-
-export function armKeyboard(now: number, idleMs = KEYBOARD_LATCH_MS): KeyboardLatch {
-  return { until: now + idleMs };
-}
-
-export function keyboardIsActive(latch: KeyboardLatch | null, now: number): boolean {
-  return latch !== null && now < latch.until;
-}
-
+// Remote Back, Exit, Menu, and colour keys can arrive with a DOM `code`. Arrow and Enter cannot
+// be split from a keyboard by `code` alone, so a focused stream sends both to the host.
 type KeyIdentity = { code: string; key: string; keyCode: number };
 
 function hasDomCode(event: KeyIdentity): boolean {
@@ -155,41 +123,35 @@ function isRemoteOnly(event: KeyIdentity): boolean {
   return event.keyCode === 18 && !hasDomCode(event);
 }
 
-function isSharedWithRemote(event: KeyIdentity): boolean {
-  return SHARED_WITH_REMOTE.has(event.code) || SHARED_WITH_REMOTE.has(event.key);
-}
-
-function isKeyboardOnly(event: KeyIdentity): boolean {
-  return hasDomCode(event) && !isRemoteOnly(event) && !isSharedWithRemote(event);
-}
-
-export type StreamKeyRoute =
-  | { kind: "ui"; arm: boolean }
-  | { kind: "ignore"; arm: false }
-  | { kind: "host"; code: string; down: boolean; arm: boolean };
+export type KeyRoute =
+  | { to: "host"; code: string; down: boolean }
+  | { to: "app" }
+  | { to: "tv" }
+  | { to: "drop" };
 
 export function routeStreamKey(args: {
-  uiOpen: boolean;
+  focus: InputFocus;
   enabled: boolean;
-  keyboardActive: boolean;
   event: KeySample;
-}): StreamKeyRoute {
-  const proof = isKeyboardOnly(args.event);
-  if (args.uiOpen) {
-    return { kind: "ui", arm: proof };
+  repeat?: boolean;
+}): KeyRoute {
+  const repeat = args.repeat === true;
+  if (leavesForTv(args.event, repeat)) {
+    return { to: "tv" };
   }
-  if (isRemoteOnly(args.event) || !hasDomCode(args.event)) {
-    return { kind: "ui", arm: false };
+  if (args.focus === "app") {
+    return { to: "app" };
   }
-  if (isSharedWithRemote(args.event) && (!args.keyboardActive || !args.enabled)) {
-    return { kind: "ui", arm: false };
+  if (isStreamMenuBack(args.event)) {
+    return args.event.type === "keydown" ? { to: "app" } : { to: "drop" };
   }
-  if (!args.enabled) {
-    return { kind: "ignore", arm: false };
+  const remote = isRemoteOnly(args.event) || !hasDomCode(args.event);
+  if (!remote && !args.enabled) {
+    return { to: "drop" };
   }
-  const decision = streamKeyDecision(args.event, true);
+  const decision = streamKeyDecision(args.event, true, repeat);
   if (decision.kind !== "forward") {
-    return { kind: "ignore", arm: false };
+    return { to: "drop" };
   }
-  return { kind: "host", code: decision.code, down: decision.down, arm: proof };
+  return { to: "host", code: decision.code, down: decision.down };
 }
