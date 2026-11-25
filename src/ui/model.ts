@@ -108,6 +108,7 @@ export type Shell = {
   launchDebug: boolean;
   playbackBlocked: boolean;
   presence: Record<string, boolean>;
+  presenceLog: string;
   sort: LibrarySort;
   showHidden: boolean;
   hidden: Record<string, string[]>;
@@ -226,6 +227,7 @@ export function initialShell(): Shell {
     launchDebug: true,
     playbackBlocked: false,
     presence: {},
+    presenceLog: "",
     sort: "title",
     showHidden: false,
     hidden: {},

@@ -1,6 +1,7 @@
 import { DISCOVER_DATAGRAM, parseDiscoveryReply, type DiscoveredHost } from "../protocol/parse.ts";
 
 export const DISCOVERY_TIMEOUT_MS = 2_000;
+export const SAVED_HOST_REFRESH_MS = 4_000;
 
 export type BroadcastReply = {
   address: string;
@@ -34,6 +35,18 @@ export function hostsFromReplies(replies: readonly BroadcastReply[]): Discovered
     rememberHost(found, seen, parseDiscoveryReply(textDecoder.decode(reply.payload), reply.address));
   }
   return found;
+}
+
+export function shouldRefreshSaved(input: {
+  saved: number;
+  confirmedOnline: number;
+  streaming: boolean;
+  bridgeReady: boolean;
+}): boolean {
+  if (!input.bridgeReady || input.streaming || input.saved <= 0) {
+    return false;
+  }
+  return input.confirmedOnline < input.saved;
 }
 
 export function shouldDiscover(input: { saved: number; screen: string; offline: number; streaming: boolean }): boolean {

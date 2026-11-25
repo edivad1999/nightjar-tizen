@@ -55,10 +55,15 @@ export function readPresenceMessage(payload: string): PresenceNotice | null {
 type Watch = {
   id: string;
   url: string;
+  address: string;
+  port: number;
   socket: PresenceSocket | null;
   cancelRetry: (() => void) | null;
   cancelGreeting: (() => void) | null;
   suppress: boolean;
+  attempt: number;
+  answered: boolean;
+  epoch: number;
 };
 
 export function browserWatchSocket(url: string): PresenceSocket {
@@ -99,7 +104,8 @@ export function createPresenceWatcher(options: {
   greetingMs?: number;
   retryMs?: number;
   pulse?: boolean;
-}): { sync: () => void; stop: () => void } {
+  onProbe?: (probe: { address: string; port: number; attempt: number; result: "open" | "online" | "offline" }) => void;
+}): { sync: () => void; stop: () => void; nextEpoch: () => number; reopenStale: (mark: number) => void } {
   const schedule = options.schedule ?? ((fn, ms) => {
     const timer = setTimeout(fn, ms);
     return () => {
@@ -111,6 +117,16 @@ export function createPresenceWatcher(options: {
   const retryMs = options.retryMs ?? PRESENCE_RETRY_MS;
   const watches = new Map<string, Watch>();
   let stopped = false;
+  let probeEpoch = 0;
+
+  function report(watch: Watch, result: "open" | "online" | "offline"): void {
+    options.onProbe?.({
+      address: watch.address,
+      port: watch.port,
+      attempt: watch.attempt,
+      result,
+    });
+  }
 
   function clearTimers(watch: Watch): void {
     watch.cancelRetry?.();
@@ -156,7 +172,9 @@ export function createPresenceWatcher(options: {
     watch.cancelGreeting?.();
     watch.cancelGreeting = null;
     detach(watch);
+    watch.answered = false;
     options.onUpdate({ id: watch.id, online: false, macAddress: null, sunshineAvailable: null });
+    report(watch, "offline");
     scheduleRetry(watch);
   }
 
@@ -175,6 +193,9 @@ export function createPresenceWatcher(options: {
       return;
     }
     clearTimers(watch);
+    watch.attempt += 1;
+    watch.answered = false;
+    watch.epoch = probeEpoch;
     let socket: PresenceSocket;
     try {
       socket = options.connect(watch.url);
@@ -183,6 +204,7 @@ export function createPresenceWatcher(options: {
       return;
     }
     watch.socket = socket;
+    report(watch, "open");
     watch.cancelGreeting = schedule(() => {
       watch.cancelGreeting = null;
       if (watch.socket === socket) {
@@ -199,6 +221,8 @@ export function createPresenceWatcher(options: {
       }
       watch.cancelGreeting?.();
       watch.cancelGreeting = null;
+      watch.answered = true;
+      report(watch, "online");
       options.onUpdate({
         id: watch.id,
         online: true,
@@ -245,10 +269,15 @@ export function createPresenceWatcher(options: {
         const watch: Watch = {
           id: host.id,
           url,
+          address: host.address,
+          port: host.port,
           socket: null,
           cancelRetry: null,
           cancelGreeting: null,
           suppress: false,
+          attempt: 0,
+          answered: false,
+          epoch: probeEpoch,
         };
         watches.set(host.id, watch);
         open(watch);
@@ -260,6 +289,8 @@ export function createPresenceWatcher(options: {
         detach(existing);
         existing.suppress = false;
         existing.url = url;
+        existing.address = host.address;
+        existing.port = host.port;
         open(existing);
         continue;
       }
@@ -281,6 +312,28 @@ export function createPresenceWatcher(options: {
 
   return {
     sync,
+    nextEpoch() {
+      probeEpoch += 1;
+      return probeEpoch;
+    },
+    reopenStale(mark: number) {
+      if (stopped) {
+        return;
+      }
+      for (const watch of watches.values()) {
+        if (watch.answered) {
+          continue;
+        }
+        if (watch.socket && watch.epoch >= mark) {
+          continue;
+        }
+        watch.suppress = true;
+        clearTimers(watch);
+        detach(watch);
+        watch.suppress = false;
+        open(watch);
+      }
+    },
     stop() {
       stopped = true;
       if (pulse !== null) {

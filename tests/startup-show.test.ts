@@ -1,4 +1,3 @@
-import assert from "node:assert/strict";
 import test from "node:test";
 import { discoveryReply, installTvPage, MOVED_ADDRESS, waitFor } from "./tv-page.ts";
 

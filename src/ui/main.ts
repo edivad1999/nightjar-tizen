@@ -21,7 +21,7 @@ import { BrowserPeer } from "../net/browser-peer.ts";
 import { SignallingClient, type MediaPeer } from "../net/client.ts";
 import { QUIT_GIVE_UP_MS } from "../protocol/machine.ts";
 import { CLIENT_LOG_FLUSH_MS } from "../net/client-log.ts";
-import { DISCOVERY_TIMEOUT_MS, hostsFromReplies, shouldDiscover, type BroadcastReply } from "../net/discover.ts";
+import { DISCOVERY_TIMEOUT_MS, hostsFromReplies, SAVED_HOST_REFRESH_MS, shouldDiscover, shouldRefreshSaved, type BroadcastReply } from "../net/discover.ts";
 import { browserWatchSocket, createPresenceWatcher } from "../net/presence.ts";
 import { STALL_SAMPLE_INTERVAL_MS } from "../net/stall.ts";
 import { findInbound, isStatsReport, type StatsReport } from "../net/stats.ts";
@@ -63,6 +63,7 @@ import {
   exitPrompt,
   exitStep,
   firstRunLocale,
+  networkCameUp,
   pinBound,
   readModel,
   registerTvKeys,
@@ -87,6 +88,9 @@ type TvHost = {
 type WebApis = {
   productinfo?: { getRealModel?: () => string };
   avinfo?: { isHdrTvSupport?: () => boolean };
+  network?: {
+    addNetworkStateChangeListener?: (listener: (state: number) => void) => number;
+  };
 };
 
 declare global {
@@ -695,6 +699,9 @@ const watcher = createPresenceWatcher({
     return host ? hostKey(host) : null;
   },
   paused: () => shell.screen === "stream",
+  onProbe: (probe) => {
+    notePresence(probe.address, probe.port, probe.attempt, probe.result);
+  },
   onUpdate: (update) => {
     const previous = shell.presence[update.id];
     if (previous !== update.online) {
@@ -712,6 +719,88 @@ const watcher = createPresenceWatcher({
 
 function syncWatches(): void {
   watcher.sync();
+}
+
+function notePresence(address: string, port: number, attempt: number, result: "open" | "online" | "offline"): void {
+  const detail = `${signallingUrl(address, port).slice("ws://".length)} attempt ${attempt} ${result}`;
+  const line = `presence ${detail}`;
+  if (shell.presenceLog === line) {
+    return;
+  }
+  shell = { ...shell, presenceLog: line };
+  if (shell.launchDebug) {
+    noteLaunch("presence", detail);
+  }
+  paint();
+}
+
+function confirmedHosts(): number {
+  return shell.hosts.filter((host) => {
+    if (shell.presence[hostKey(host)] === true) {
+      return true;
+    }
+    return host.address === shell.activeAddress && shell.link.phase.kind === "online";
+  }).length;
+}
+
+let refreshToken = 0;
+
+async function refreshSaved(): Promise<void> {
+  const bridge = globalThis.NightjarUdp;
+  if (!bridge || !shouldRefreshSaved({
+    saved: shell.hosts.length,
+    confirmedOnline: confirmedHosts(),
+    streaming: shell.screen === "stream",
+    bridgeReady: true,
+  })) {
+    return;
+  }
+  const token = ++refreshToken;
+  const mark = watcher.nextEpoch();
+  let replies: BroadcastReply[];
+  try {
+    replies = await bridge.broadcast(new TextEncoder().encode(DISCOVER_DATAGRAM), DISCOVERY_PORT, DISCOVERY_TIMEOUT_MS);
+  } catch {
+    if (token === refreshToken) {
+      watcher.reopenStale(mark);
+    }
+    return;
+  }
+  if (token !== refreshToken) {
+    return;
+  }
+  const found = hostsFromReplies(replies);
+  if (found.length > 0) {
+    const hosts = upsertHosts(shell.hosts, found.map((item) => ({
+      name: item.name,
+      address: item.address,
+      port: item.port,
+      macAddress: item.macAddress,
+      credentials: credentialsForDiscovery(shell.hosts, item.macAddress),
+    })));
+    apply({ kind: "hosts", hosts });
+  }
+  syncWatches();
+  watcher.reopenStale(mark);
+}
+
+function watchNetwork(): void {
+  window.addEventListener("online", () => {
+    void refreshSaved();
+  });
+  const network = webApis()?.network;
+  if (!network || typeof network.addNetworkStateChangeListener !== "function") {
+    return;
+  }
+  try {
+    network.addNetworkStateChangeListener((state) => {
+      if (networkCameUp(state)) {
+        void refreshSaved();
+      }
+    });
+  } catch {
+    return;
+  }
 }
 
 peer.setControlHandler((text) => {
@@ -1772,6 +1861,8 @@ const migrated = migrateLibraryKeys(shell.hosts, shell.lastAppByAddress, shell.q
 shell = { ...shell, lastAppByAddress: migrated.lastAppByAddress, quitOnDisconnect: migrated.quitOnDisconnect };
 syncWatches();
 maybeDiscover();
+void refreshSaved();
+watchNetwork();
 
 window.setInterval(() => {
   if (platformPaused || !shell.countdown) {
@@ -1780,6 +1871,13 @@ window.setInterval(() => {
   shell = reduceShell(shell, { kind: "tick-countdown" });
   paint();
 }, 1000);
+
+window.setInterval(() => {
+  if (platformPaused) {
+    return;
+  }
+  void refreshSaved();
+}, SAVED_HOST_REFRESH_MS);
 
 void loadCovers();
 
@@ -1802,6 +1900,8 @@ function onTvHidden(): void {
 function onTvVisible(): void {
   platformPaused = false;
   const resume = applyShow(shell.link.phase.kind === "online", tvHost());
+  syncWatches();
+  void refreshSaved();
   if (!suspendedStream) {
     return;
   }

@@ -321,10 +321,10 @@ export function installTvPage(options?: {
 
   globalThis.setTimeout = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
     return track(REAL_TIMEOUT(fn as () => void, ms, ...(args as [])));
-  }) as typeof setTimeout;
+  }) as unknown as typeof setTimeout;
   globalThis.setInterval = ((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
     return track(REAL_INTERVAL(fn as () => void, ms, ...(args as [])));
-  }) as typeof setInterval;
+  }) as unknown as typeof setInterval;
   globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
     REAL_CLEAR_TIMEOUT(id);
     timers.delete(id);
